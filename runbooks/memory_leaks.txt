@@ -1,0 +1,27 @@
+# Out of memory kills
+
+Symptom: a process disappears without warning and the system log shows the kernel out-of-memory killer ended it.
+Find which process was killed and how much memory it was using at that time.
+Restart the killed service and watch its memory use for thirty minutes.
+If it grows again, treat it as a memory leak and open a ticket for the owning team with the log lines attached.
+
+# High swap usage
+
+Symptom: the server is slow, disk activity is high, and swap use stays above fifty percent.
+List the processes by memory use and find the largest ones.
+Restart the biggest non-critical process to free memory, and avoid adding more swap as the fix.
+If swap fills up again within a day, plan to add memory or move the workload to a bigger host.
+
+# Process memory keeps growing
+
+Symptom: a service uses more memory every hour and never gives it back, until it is restarted.
+Chart the memory use of the process over the last day to confirm the steady climb.
+Schedule a rolling restart of the service as a short-term fix, one instance at a time so users are not affected.
+Ask the owning team to take a memory profile and find the leak before the next release.
+
+# Container exceeds its memory limit
+
+Symptom: a container restarts again and again with the reason "out of memory" and exit code 137.
+Compare the container memory limit with its normal use in the monitoring dashboard.
+If normal use is close to the limit, raise the limit a little and watch the container for a day.
+If use climbs without stopping, roll back to the previous release and treat it as a leak.

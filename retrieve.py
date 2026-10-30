@@ -18,6 +18,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 RUNBOOK_DIR = Path(__file__).parent / "runbooks"
 CHUNK_SIZE = 400  # characters per chunk (target 300-500)
 OVERLAP = 80  # characters shared between neighbouring chunks
+MIN_TAIL = 120  # a last chunk shorter than this is merged into the one before it
 TOP_K = 3
 MIN_SCORE = 0.05  # scores below this count as "not relevant"
 
@@ -43,12 +44,16 @@ def load_runbooks(directory=RUNBOOK_DIR):
     return docs
 
 
-def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP):
-    """Split text into overlapping pieces, preferring to cut at a space."""
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP, min_tail=MIN_TAIL):
+    """Split text into overlapping pieces, preferring to cut at a space.
+
+    A very short last piece (under min_tail characters) is merged into the
+    piece before it, so a search never returns a tiny fragment."""
     if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
         raise RetrieveError("BAD_SETTINGS", "need chunk_size > 0 and 0 <= overlap < chunk_size.")
     text = " ".join(text.split())  # collapse whitespace
     chunks = []
+    starts = []
     start = 0
     while start < len(text):
         end = min(start + chunk_size, len(text))
@@ -59,11 +64,15 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=OVERLAP):
         piece = text[start:end].strip()
         if piece:
             chunks.append(piece)
+            starts.append(start)
         if end >= len(text):
             break
         nxt = max(end - overlap, start + 1)
         space = text.find(" ", nxt, end)  # begin the next chunk at a word boundary
         start = space + 1 if space != -1 else nxt
+    if len(chunks) > 1 and len(chunks[-1]) < min_tail:
+        chunks.pop()
+        chunks[-1] = text[starts[-2]:].strip()  # previous piece now runs to the end
     return chunks
 
 

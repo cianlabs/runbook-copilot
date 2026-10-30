@@ -1,0 +1,27 @@
+# Deploy fails during release
+
+Symptom: the release pipeline stops with a red status and the new version never reaches the servers.
+Open the pipeline log and find the first failing step, such as a build error or a failed test.
+Fix the cause or revert the change that introduced it, then run the release again.
+Do not skip the failing step to get the release out.
+
+# Roll back a bad release
+
+Symptom: errors or slow responses start right after a deploy, and the previous version was healthy.
+Announce the rollback in the incident channel before starting it.
+Redeploy the last known good release using the rollback command in the release tool.
+Confirm error rates return to normal for ten minutes, then record the release number and time in the incident ticket.
+
+# Health check keeps failing
+
+Symptom: the load balancer marks new servers as unhealthy, so they never receive traffic after a deploy.
+Call the health check address by hand on one new server and read the response and any error text.
+Check that the service finished starting, and that its configuration and secrets were loaded.
+If the check passes by hand but fails on the load balancer, check the port and path set in the health check settings.
+
+# Database change breaks the new release
+
+Symptom: the new version crashes on startup with a missing column or table error.
+Check whether the database migration for this release has been applied in this environment.
+Run the pending migration if it is safe, otherwise roll back the application release.
+Never undo a database migration without the database on-call engineer approving it.

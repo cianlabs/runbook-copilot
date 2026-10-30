@@ -1,0 +1,27 @@
+# DNS lookup failures
+
+Symptom: services log "name not resolved" or "temporary failure in name resolution", while connecting by IP address still works.
+Check which resolver the host uses and test it directly with a lookup against that resolver.
+If the resolver is down, switch the host to the backup resolver and tell the network team.
+Clear the local DNS cache after the fix, and confirm the affected service can resolve names again.
+
+# Packet loss and high latency
+
+Symptom: requests time out at random, pings show lost packets, and page loads are slow.
+Run a ping and a traceroute to the destination and note which hop starts dropping packets.
+If the loss starts inside our network, check the switch or load balancer on that hop for errors and saturated links.
+If it starts outside our network, open a ticket with the internet provider and include the traceroute output.
+
+# Firewall blocks a connection
+
+Symptom: a connection hangs or is refused only between two specific systems, and both systems are healthy.
+Test the exact port from the source host to confirm the connection is being dropped.
+Read the firewall logs for a deny rule that matches the source address and port.
+Ask the security team to add an allow rule for that single source and port. Never disable the firewall to test.
+
+# Network interface is down
+
+Symptom: a server is unreachable on the network, but it still responds on the console.
+Check the interface status and the cable or virtual link, and look for recent link-down messages in the system log.
+Restart the network interface, and if the link does not return, move the server to a standby port.
+Record the time the link dropped and the fix in the incident ticket.

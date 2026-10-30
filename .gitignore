@@ -1,0 +1,19 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Key and secret files
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# Python junk
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store

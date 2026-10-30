@@ -1,0 +1,27 @@
+# Database connection errors
+
+Symptom: the application logs "connection refused" or "too many connections" when talking to the database.
+First check whether the database service is running and accepting connections on its port.
+If the connection pool is exhausted, restart the application workers to release stale connections, then raise the pool size only if the problem repeats.
+Escalate to the database on-call engineer if connections stay saturated for more than fifteen minutes.
+
+# High CPU on web servers
+
+Symptom: web servers show CPU above ninety percent and response times climb.
+Open the monitoring dashboard and find which process is using the CPU. A runaway worker is the most common cause.
+Restart the offending worker and watch CPU for five minutes. If a recent deploy started the problem, roll back to the previous release.
+Record the time, the process name and the fix in the incident ticket.
+
+# Disk space almost full
+
+Symptom: alerts say a disk is above eighty-five percent full, or writes fail with "no space left on device".
+Find the largest folders with a disk usage report, starting with the log directory.
+Rotate and compress old log files, then delete temporary files older than seven days.
+Never delete files in the data directory without approval from the service owner.
+
+# Certificate expiry
+
+Symptom: browsers show a certificate warning, or monitoring reports a certificate expiring within fourteen days.
+Check the expiry date of the certificate on the affected domain.
+Renew it through the certificate authority and install the new certificate on the load balancer.
+Confirm the new expiry date in a browser, then close the alert.

@@ -17,3 +17,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Tool-call log written by agent.py
+agent.log

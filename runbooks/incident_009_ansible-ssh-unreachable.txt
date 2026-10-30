@@ -1,0 +1,12 @@
+# Hosts marked unreachable even though plain SSH login works
+
+Symptom: ansible reports UNREACHABLE with "Failed to connect to the host via ssh" while a manual ssh to the same host succeeds.
+The usual cause is that Ansible connects with a different user, key or address than your own ssh command does.
+
+# Fix for Hosts marked unreachable even though plain SSH login works
+
+Run with -vvvv to see the exact ssh command Ansible builds. Set the remote user explicitly with -u or remote_user in ansible.cfg, instead of relying on your personal ssh config. Do not put user@ inside ansible_host, give the plain host and set the user separately. If the key has a passphrase or is not the default, load it into ssh-agent or set the private key file for the host. Then retry with the ping module.
+
+# Source for Hosts marked unreachable even though plain SSH login works
+
+Adapted from https://github.com/ansible/ansible/issues/15321 (ansible/ansible, closed). Public issue text, condensed.

@@ -1,0 +1,12 @@
+# Git module fails to get the hostkey after upgrading to Ansible 2.2.1
+
+Symptom: git checkout tasks fail with "failed to get the hostkey for" after upgrading to Ansible 2.2.1, even with host_key_checking disabled.
+It mostly affected Git servers on a non-standard SSH port.
+
+# Fix for Git module fails to get the hostkey after upgrading to Ansible 2.2.1
+
+Workarounds reported by users: drop accept_hostkey and pass ssh_opts with StrictHostKeyChecking=no, or add the Git server key to known_hosts in an earlier task using ssh-keyscan. Pinning Ansible back to 2.1.2 also avoided the problem until a fixed release came out. After the change, rerun the clone task and confirm it checks out the code.
+
+# Source for Git module fails to get the hostkey after upgrading to Ansible 2.2.1
+
+Adapted from https://github.com/ansible/ansible/issues/20653 (ansible/ansible, closed). Public issue text, condensed.

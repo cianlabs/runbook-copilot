@@ -1,0 +1,12 @@
+# Metrics API unavailable with Client.Timeout exceeded while awaiting headers
+
+Symptom: after deploying metrics-server, the APIService v1beta1.metrics.k8s.io shows Available False with "Client.Timeout exceeded while awaiting headers", and kubectl top fails with ServiceUnavailable.
+The apiserver cannot reach the metrics-server service IP.
+
+# Fix for Metrics API unavailable with Client.Timeout exceeded while awaiting headers
+
+Test whether the control plane node can reach the metrics-server service address by hand, for example with curl to its cluster IP on port 443. Make sure kube-proxy is running on the master nodes, and that the CNI plugin is installed and healthy there, so the apiserver can route to service IPs. Check that no https_proxy setting in the apiserver environment intercepts cluster traffic. When the APIService reports Available True, kubectl top should work.
+
+# Source for Metrics API unavailable with Client.Timeout exceeded while awaiting headers
+
+Adapted from https://github.com/kubernetes/kubernetes/issues/66231 (kubernetes/kubernetes, closed). Public issue text, condensed.

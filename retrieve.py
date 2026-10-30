@@ -8,6 +8,9 @@ Named failures (each message says what to do):
   NO_RUNBOOKS  - the runbooks folder is missing or has no .txt/.md files
   EMPTY_QUERY  - search() was called with an empty query
   BAD_SETTINGS - chunk_size / overlap values do not make sense
+
+Word matching ignores simple endings, so "deployment", "deploys" and "deployed"
+all match "deploy", and "failed", "fails" and "failing" all match "fail".
 """
 
 from pathlib import Path
@@ -21,6 +24,33 @@ OVERLAP = 80  # characters shared between neighbouring chunks
 MIN_TAIL = 120  # a last chunk shorter than this is merged into the one before it
 TOP_K = 3
 MIN_SCORE = 0.05  # scores below this count as "not relevant"
+
+
+SUFFIXES = ("ments", "ment", "ings", "ing", "ures", "ure", "ed", "es", "s")
+
+
+def stem(word):
+    """Cut a simple ending off a word, so related forms match: deployment -> deploy.
+
+    This is deliberately tiny, not a full stemmer. Both the runbooks and the query
+    go through it, so the same word always becomes the same stem."""
+    for suffix in SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    if word.endswith("e") and len(word) >= 5:  # release / releases -> releas
+        word = word[:-1]
+    if len(word) >= 4 and word[-1] == word[-2]:  # running -> runn -> run
+        word = word[:-1]
+    return word
+
+
+class StemmedVectorizer(TfidfVectorizer):
+    """TF-IDF where every word is stemmed (single words and word pairs alike)."""
+
+    def build_analyzer(self):
+        analyzer = super().build_analyzer()
+        return lambda doc: [" ".join(stem(w) for w in term.split()) for term in analyzer(doc)]
 
 
 class RetrieveError(Exception):
@@ -114,7 +144,7 @@ class Index:
 
     def __init__(self, directory=RUNBOOK_DIR, chunk_size=CHUNK_SIZE, overlap=OVERLAP):
         self.chunks = build_chunks(directory, chunk_size, overlap)
-        self.vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+        self.vectorizer = StemmedVectorizer(stop_words="english", ngram_range=(1, 2))
         self.matrix = self.vectorizer.fit_transform([c["section"] + " " + c["text"] for c in self.chunks])
 
     def search(self, query, top_k=TOP_K, min_score=MIN_SCORE):

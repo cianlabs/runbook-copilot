@@ -1,0 +1,12 @@
+# Playbook YAML syntax error when a string contains a colon and space
+
+Symptom: ansible-playbook stops with "Syntax Error while loading YAML script" and points at a line where a value contains a colon followed by a space.
+This is a YAML rule, since colon plus space starts a new key, and it often hits lineinfile and debug tasks.
+
+# Fix for Playbook YAML syntax error when a string contains a colon and space
+
+Quote the whole value, not just part of it, for example msg: "foo: bar" in YAML form instead of key=value form. If quoting is awkward, write the colon as a Jinja expression such as {{':'}}. In regex filters, matching the space with a backslash s also avoids the sequence. Run ansible-playbook with --syntax-check to confirm the file parses.
+
+# Source for Playbook YAML syntax error when a string contains a colon and space
+
+Adapted from https://github.com/ansible/ansible/issues/2769 (ansible/ansible, closed). Public issue text, condensed.

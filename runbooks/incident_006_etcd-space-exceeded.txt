@@ -1,0 +1,12 @@
+# Apiserver writes fail with etcd mvcc database space exceeded
+
+Symptom: apiserver requests return errors with "etcdserver: mvcc: database space exceeded" and compaction fails, so the cluster cannot write.
+It happened after creating and deleting a very large number of services. The service IP allocation bitmap for a /12 service range is very large.
+
+# Fix for Apiserver writes fail with etcd mvcc database space exceeded
+
+Recover etcd by hand: compact the key space, defragment the etcd backend, then disarm the NOSPACE alarm with etcdctl. The apiserver compactor cannot do this itself once etcd is full. To prevent it, use a smaller service CIDR such as a /16 when you create the cluster, or raise the etcd quota. The kind project changed its default to a /16. There was no single code fix, and the issue was closed without one.
+
+# Source for Apiserver writes fail with etcd mvcc database space exceeded
+
+Adapted from https://github.com/kubernetes/kubernetes/issues/94029 (kubernetes/kubernetes, closed). Public issue text, condensed.

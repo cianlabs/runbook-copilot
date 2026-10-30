@@ -1,0 +1,12 @@
+# CoreDNS logs read udp i/o timeout and pods fail name lookups
+
+Symptom: CoreDNS logs "[ERROR] plugin/errors: 2 read udp ... :53: i/o timeout" and applications fail to resolve internal services or external names now and then.
+The failures are intermittent and often appear under load.
+
+# Fix for CoreDNS logs read udp i/o timeout and pods fail name lookups
+
+Several causes were reported, so check each. If the node conntrack table is full, raise nf_conntrack_max on the nodes. If host firewall rules drop forwarded traffic, check the iptables FORWARD policy and allow pod traffic, then delete the CoreDNS pods so they restart. Reporters on kubespray clusters fixed it this way. Also check whether the upstream DNS server is slow for some domains. These were user workarounds, not one product fix.
+
+# Source for CoreDNS logs read udp i/o timeout and pods fail name lookups
+
+Adapted from https://github.com/kubernetes/kubernetes/issues/86762 (kubernetes/kubernetes, closed). Public issue text, condensed.

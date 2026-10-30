@@ -1,0 +1,12 @@
+# Timeout waiting for privilege escalation prompt in long playbooks
+
+Symptom: tasks fail at random with "Timeout (12s) waiting for privilege escalation prompt", often several minutes into a long playbook.
+It began with Ansible 2.0 and was more common on slow or cloud hosts.
+
+# Fix for Timeout waiting for privilege escalation prompt in long playbooks
+
+Raise the connection timeout in ansible.cfg, for example timeout = 30 in the [defaults] section. On some RHEL 6 hosts sudo was slow because fingerprint authentication was enabled, and running authconfig --disablefingerprint --update fixed it. Newer authconfig versions do not have the problem. Also check that become_method matches the host, since a wrong method such as su can hang the same way.
+
+# Source for Timeout waiting for privilege escalation prompt in long playbooks
+
+Adapted from https://github.com/ansible/ansible/issues/14426 (ansible/ansible, closed). Public issue text, condensed.

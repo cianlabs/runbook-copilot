@@ -1,0 +1,12 @@
+# Yum tasks fail with lockfile is held by another process
+
+Symptom: package or yum tasks fail with "yum lockfile is held by another process" after upgrading to Ansible 2.8, often right after a host boots.
+Another yum process, such as an automatic update run, or a stale lock file holds the lock.
+
+# Fix for Yum tasks fail with lockfile is held by another process
+
+Ansible 2.8 added a lock_timeout option to the yum module, so set it to wait, for example 180 seconds. A user workaround is a task before each install that waits until other yum processes finish. If no yum process is running, the lock may be stale from a crash. Remove the stale yum pid file under /run only after confirming no yum is running. Some users reported the error continued, so treat this as a workaround.
+
+# Source for Yum tasks fail with lockfile is held by another process
+
+Adapted from https://github.com/ansible/ansible/issues/57189 (ansible/ansible, closed). Public issue text, condensed.

@@ -1,0 +1,12 @@
+# Pods fail with CreateContainerConfigError preparing subPath for a configMap volume
+
+Symptom: new pods fail with "CreateContainerConfigError: failed to prepare subPath for volumeMount" when a configMap or secret is mounted with subPath.
+It started after a security patch release and was a regression in the subPath safety check.
+
+# Fix for Pods fail with CreateContainerConfigError preparing subPath for a configMap volume
+
+Upgrade the kubelet to a patched release. The fix shipped in 1.10.0-rc.1, 1.9.5, 1.8.10 and 1.7.15. Until you can upgrade, a workaround is to mount the whole configMap or secret at another path and symlink the file you need, for example from an init container. That approach also lets the container see later configMap updates, which subPath mounts never receive.
+
+# Source for Pods fail with CreateContainerConfigError preparing subPath for a configMap volume
+
+Adapted from https://github.com/kubernetes/kubernetes/issues/61076 (kubernetes/kubernetes, closed). Public issue text, condensed.

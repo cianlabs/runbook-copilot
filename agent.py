@@ -4,8 +4,9 @@ A language model reads the user's request and decides which tool to call.
 The loop runs search_runbooks for it, gives the results back, and prints the
 model's final answer. The model can ask for execute_action, but only a human
 can allow it: the agent shows the proposed action and asks y/n. Anything other
-than y or yes denies it. execute_action itself is still a stub that only
-prints, and it refuses to run unless the approval gate passed.
+than y or yes denies it. execute_action then SIMULATES the action: it parses
+the action text, prints realistic steps and returns an ActionResult. It never
+signals a real process, and it refuses to run unless the approval gate passed.
 
 Testing the approval gate without the model:
   python agent.py --force-action   (or -f) skips the model and goes straight to
@@ -19,11 +20,17 @@ Named failures:
   EMPTY_REQUEST             - the user request was empty
   UNKNOWN_TOOL              - the model asked for a tool that does not exist
   NOT_IMPLEMENTED_APPROVAL  - execute_action was called without human approval
+  UNKNOWN_ACTION            - the approved action did not match any known action pattern
 """
 
 import json
 import os
+import re
 import sys
+import zlib
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 import retrieve
 
@@ -33,7 +40,8 @@ XAI_BASE_URL = "https://api.x.ai/v1"
 SYSTEM_PROMPT = (
     "You are a runbook assistant. To answer a problem, call search_runbooks with a "
     "short, focused query. Answer only from what the search returns. If you think a "
-    "step should be carried out, call execute_action; a human must approve it first."
+    "step should be carried out, call execute_action; a human must approve it first. "
+    "Write the action as: restart the process '<name>' (for example 'runaway-worker')."
 )
 
 
@@ -45,6 +53,36 @@ class AgentError(Exception):
         super().__init__(f"{name}: {message}")
 
 
+# ---- Tool-call log ---------------------------------------------------------
+# One line per tool call, appended to agent.log next to this file:
+#   2026-10-29T18:10:00-07:00 | search_runbooks | args={"query": "cpu"} | top="High CPU" score=0.400
+#   2026-10-29T18:10:09-07:00 | execute_action | args={"action": "restart ..."} | denied
+# Only tool names, arguments and short result summaries are logged, never keys.
+# Set LOG_FILE to None to turn logging off.
+
+LOG_FILE = Path(__file__).resolve().parent / "agent.log"
+
+
+def log_tool_call(tool, arguments, summary):
+    """Append one readable line to LOG_FILE. A logging problem never breaks the agent."""
+    if LOG_FILE is None:
+        return
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    line = f"{stamp} | {tool} | args={json.dumps(arguments, default=str)} | {' '.join(str(summary).split())}\n"
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        print(f"LOG_WRITE_FAILED: could not write {LOG_FILE} ({type(e).__name__}). Continuing without a log.", file=sys.stderr)
+
+
+def summarize_search(results):
+    if not results:
+        return "no results"
+    top = results[0]
+    return f'top="{top["section"]}" score={top["score"]:.3f} ({len(results)} results)'
+
+
 # ---- Tools -----------------------------------------------------------------
 
 def search_runbooks(query):
@@ -52,19 +90,82 @@ def search_runbooks(query):
     return retrieve.search(query)  # looked up at call time so tests can swap it
 
 
-def execute_action(action, approved=False):
-    """STUB. Only runs after a human approved this exact action.
+@dataclass
+class ActionResult:
+    """What an approved action did. status is "success" or "failure"."""
 
-    When built for real, this will change real systems (restart a worker,
-    roll back a deploy, ...). For now it only reports what it would do.
-    `approved` is set by the approval gate in run_agent, never by the model.
+    status: str
+    action: str  # what was done, in plain words
+    details: dict = field(default_factory=dict)
+    error: str = ""  # a named failure class when status is "failure"
+
+    @property
+    def ok(self):
+        return self.status == "success"
+
+
+# Read the action text. Only "restart" is known so far. The name must be given
+# after process/worker/service, or be a hyphenated name such as runaway-worker.
+RESTART_PATTERNS = [
+    re.compile(r"^\s*(?:please\s+)?restart\s+(?:the\s+)?(?:process|worker|service)\s+['\"]?([A-Za-z0-9][\w.-]*)", re.I),
+    re.compile(r"^\s*(?:please\s+)?restart\s+(?:the\s+)?['\"]?([A-Za-z0-9]\w*[-_.][\w.-]*)", re.I),
+]
+PROTECTED_PROCESSES = {"init", "systemd", "sshd"}  # the simulation refuses these
+# Made-up process table: name -> (old pid, new pid, CPU percent after restart).
+KNOWN_PROCESSES = {"runaway-worker": (1842, 2107, 12)}
+
+
+def parse_action(action):
+    """Return ("restart", process_name), or raise UNKNOWN_ACTION."""
+    for pattern in RESTART_PATTERNS:
+        m = pattern.match(action or "")
+        if m:
+            return "restart", m.group(1)
+    raise AgentError(
+        "UNKNOWN_ACTION",
+        f"I do not know how to do: {action!r}. Known action: restart the process '<name>'.",
+    )
+
+
+def simulate_restart(name):
+    """Print a realistic restart, step by step. Nothing real is touched."""
+    if name.lower() in PROTECTED_PROCESSES:
+        print(f"Refusing to stop protected process {name}.")
+        return ActionResult(
+            "failure", f"restart process {name}", {"process": name, "reason": "protected process"},
+            error="PROTECTED_PROCESS",
+        )
+    if name in KNOWN_PROCESSES:
+        old_pid, new_pid, cpu = KNOWN_PROCESSES[name]
+    else:  # a steady made-up pid and CPU so the same name always looks the same
+        h = zlib.crc32(name.encode())
+        old_pid, new_pid, cpu = 1000 + h % 8000, 1000 + h % 8000 + 265, 8 + h % 13
+    print(f"[simulated] Sending SIGTERM to process {name} (pid {old_pid})...")
+    print("[simulated] Waiting 5 seconds...")  # printed only, nothing actually waits
+    print(f"[simulated] Process {name} stopped.")
+    print(f"[simulated] Starting replacement {name}...")
+    print(f"[simulated] Replacement started with pid {new_pid}.")
+    print(f"[simulated] CPU normalized to {cpu}%.")
+    return ActionResult(
+        "success", f"restart process {name}",
+        {"process": name, "old_pid": old_pid, "new_pid": new_pid, "cpu_percent": cpu, "simulated": True},
+    )
+
+
+def execute_action(action, approved=False):
+    """SIMULATED. Only runs after a human approved this exact action.
+
+    Reads the action text, prints what a real run would do, and returns an
+    ActionResult. No real process is ever touched. `approved` is set by the
+    approval gate in run_agent, never by the model.
     """
     if approved is not True:
         raise AgentError(
             "NOT_IMPLEMENTED_APPROVAL",
             "execute_action requires human approval before running anything.",
         )
-    return f"[STUB] Approved and executed: {action} (nothing real was changed)"
+    kind, name = parse_action(action)  # raises UNKNOWN_ACTION
+    return simulate_restart(name)
 
 
 # The registry: tool name -> function.
@@ -79,7 +180,12 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "search_runbooks",
-            "description": "Search the runbook knowledge base. Returns the most relevant sections with scores.",
+            "description": (
+                "Look things up in the runbooks. Use this when the user asks a question, describes a problem, "
+                "or wants information: 'what does the runbook say about high CPU', 'why is the disk full', "
+                "'how do I roll back a bad release', 'DNS name not resolved', 'deployment failed'. "
+                "It only reads and changes nothing. Returns the most relevant sections with scores."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Short search words."}},
@@ -91,7 +197,13 @@ TOOL_SPECS = [
         "type": "function",
         "function": {
             "name": "execute_action",
-            "description": "Carry out an action on a real system. A human must approve it before it runs.",
+            "description": (
+                "Do something. Use this when the user gives a clear command to carry out: 'restart the web server', "
+                "'kill the runaway process', 'restart the web worker', 'stop runaway-worker'. Do not search first for "
+                "a clear command. Write the action as: restart the process '<name>' (for example "
+                "'runaway-worker'; for 'the web server' use 'web-server'). A human must approve it before it runs, "
+                "and for now it is only simulated. Do NOT use it to answer questions or to look things up."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"action": {"type": "string", "description": "The exact action to run."}},
@@ -104,11 +216,19 @@ TOOL_SPECS = [
 
 def call_tool(name, **arguments):
     if name not in TOOLS:
+        log_tool_call(name, arguments, "error=UNKNOWN_TOOL")
         raise AgentError("UNKNOWN_TOOL", f"no tool named '{name}'. Known tools: {', '.join(TOOLS)}.")
     try:
-        return TOOLS[name](**arguments)
+        result = TOOLS[name](**arguments)
     except TypeError:
+        log_tool_call(name, arguments, "error=BAD_TOOL_ARGS")
         raise AgentError("BAD_TOOL_ARGS", f"the model gave the wrong arguments for {name}: {arguments}.")
+    except AgentError as e:
+        log_tool_call(name, arguments, f"error={e.name}")
+        raise
+    if name == "search_runbooks":  # execute_action is logged by run_gated_action (approved or denied)
+        log_tool_call(name, arguments, summarize_search(result))
+    return result
 
 
 # ---- The model -------------------------------------------------------------
@@ -174,10 +294,17 @@ def run_gated_action(action, ask=input):
     """Ask a human, then run execute_action only if they said yes."""
     if not approval_gate(action, ask=ask):
         print("Action denied. Nothing was run.")
+        log_tool_call("execute_action", {"action": action}, "denied")
         return "denied"
     # Only the action text comes from outside. approved=True is ours.
-    outcome = call_tool("execute_action", action=action, approved=True)
-    print(outcome)
+    try:
+        outcome = call_tool("execute_action", action=action, approved=True)
+    except AgentError:  # call_tool already logged the named error
+        raise
+    log_tool_call("execute_action", {"action": action},
+                  f"approved, result={outcome.status}" + (f" error={outcome.error}" if outcome.error else ""))
+    line = f"Result: {outcome.status} - {outcome.action}"
+    print(line + (f" ({outcome.error})" if outcome.error else ""))
     return outcome
 
 

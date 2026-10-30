@@ -1,0 +1,12 @@
+# Image pull fails with x509 certificate signed by unknown authority
+
+Symptom: pods stay in ErrImagePull or ImagePullBackOff and the events show "x509: certificate signed by unknown authority" when pulling from a registry.
+It usually happens with a private registry that uses a self-signed or internal CA certificate, or on nodes whose CA bundle is out of date.
+
+# Fix for Image pull fails with x509 certificate signed by unknown authority
+
+The container runtime does not always trust the host CA store, so the registry CA must be installed on every node that can run the pod. For Docker, place the CA file at /etc/docker/certs.d/<registry-host:port>/ca.crt and restart the runtime. If the registry is public, update the ca-certificates package on the node. Retry the pull and confirm the pod starts. Re-check after node upgrades, because a rebuilt node may lose the certificate.
+
+# Source for Image pull fails with x509 certificate signed by unknown authority
+
+Adapted from https://github.com/kubernetes/kubernetes/issues/43924 (kubernetes/kubernetes, closed). Public issue text, condensed.

@@ -1,0 +1,12 @@
+# Kubelet logs failed to get system container stats for kubelet.service
+
+Symptom: kubelet logs "Failed to get system container stats for /system.slice/kubelet.service ... unknown container" every few seconds.
+Seen on CentOS and Ubuntu nodes set up with kubeadm. The cluster keeps working but the logs fill with errors and node stats are incomplete.
+
+# Fix for Kubelet logs failed to get system container stats for kubelet.service
+
+This was a workaround, not a code fix. Add a systemd drop-in for the kubelet, for example in /etc/systemd/system/kubelet.service.d/, with CPUAccounting=true and MemoryAccounting=true in the [Service] section. Run systemctl daemon-reload and restart the kubelet. Some users also fixed it by making sure the kubelet starts after the container runtime, or by upgrading Docker and containerd. Confirm the error stops in the kubelet log.
+
+# Source for Kubelet logs failed to get system container stats for kubelet.service
+
+Adapted from https://github.com/kubernetes/kubernetes/issues/56850 (kubernetes/kubernetes, closed). Public issue text, condensed.

@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -86,7 +87,10 @@ def make_asker(*answers):
     return ask
 
 
-def action_client(action="restart the offending worker"):
+RESTART = "restart the process 'runaway-worker'"
+
+
+def action_client(action=RESTART):
     return FakeClient(tool_reply("execute_action", {"action": action}))
 
 
@@ -97,7 +101,7 @@ def test_approval_prompt_shows_the_action_summary(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "needs your approval" in out
     assert "execute_action" in out
-    assert "restart the offending worker" in out
+    assert "runaway-worker" in out
     assert "High CPU on web servers" in out  # runbook context
     assert ask.prompts == ["Approve this action? (y/n) "]
 
@@ -106,8 +110,9 @@ def test_approval_prompt_shows_the_action_summary(monkeypatch, capsys):
 def test_yes_allows_the_action(monkeypatch, capsys, answer):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
     result = agent.run_agent("fix cpu", client=action_client(), ask=make_asker(answer))
-    assert "[STUB] Approved and executed: restart the offending worker" in result
-    assert "Approved and executed" in capsys.readouterr().out
+    assert result.status == "success"
+    assert result.action == "restart process runaway-worker"
+    assert "Result: success" in capsys.readouterr().out
 
 
 def test_n_denies_the_action(monkeypatch, capsys):
@@ -116,7 +121,7 @@ def test_n_denies_the_action(monkeypatch, capsys):
     assert result == "denied"
     out = capsys.readouterr().out
     assert "Action denied. Nothing was run." in out
-    assert "Approved and executed" not in out
+    assert "[simulated]" not in out
 
 
 @pytest.mark.parametrize("answer", ["", "   ", "maybe", "sure", "ok", "yep", "no"])
@@ -124,7 +129,7 @@ def test_empty_or_invalid_answer_denies_the_action(monkeypatch, capsys, answer):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
     result = agent.run_agent("fix cpu", client=action_client(), ask=make_asker(answer))
     assert result == "denied"
-    assert "Approved and executed" not in capsys.readouterr().out
+    assert "[simulated]" not in capsys.readouterr().out
 
 
 def test_model_cannot_approve_its_own_action(monkeypatch):
@@ -224,10 +229,11 @@ def test_force_flag_shows_the_approval_prompt_without_the_model(no_model, capsys
 
 
 @pytest.mark.parametrize("answer", ["y", "yes", "YES"])
-def test_force_flag_y_approves_and_runs_the_stub(no_model, capsys, answer):
+def test_force_flag_y_approves_and_runs_the_simulation(no_model, capsys, answer):
     result = agent.main(["--force-action"], ask=make_asker(answer))
-    assert "[STUB] Approved and executed: restart the process 'runaway-worker'" in result
-    assert "nothing real was changed" in capsys.readouterr().out
+    assert result.status == "success"
+    assert result.details["process"] == "runaway-worker"
+    assert "CPU normalized to 12%" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("answer", ["n", "no", "", "maybe"])
@@ -236,7 +242,7 @@ def test_force_flag_n_or_anything_else_denies(no_model, capsys, answer):
     assert result == "denied"
     out = capsys.readouterr().out
     assert "Action denied. Nothing was run." in out
-    assert "Approved and executed" not in out
+    assert "[simulated]" not in out
 
 
 def test_force_flag_ignores_other_words_on_the_command_line(no_model, capsys):
@@ -270,3 +276,156 @@ def test_without_the_flag_missing_key_is_still_a_named_failure(monkeypatch, caps
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     agent.main(["fix", "cpu"], ask=make_asker())
     assert "MISSING_KEY" in capsys.readouterr().out
+
+
+# ---- Simulated execution ------------------------------------------------------
+
+def test_approved_restart_prints_the_simulated_steps_and_returns_success(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    result = agent.run_agent("fix cpu", client=action_client(), ask=make_asker("y"))
+    out = capsys.readouterr().out
+    assert "Sending SIGTERM to process runaway-worker (pid 1842)" in out
+    assert "Waiting 5 seconds" in out
+    assert "runaway-worker stopped" in out
+    assert "Replacement started with pid 2107" in out
+    assert "CPU normalized to 12%" in out
+    assert "Result: success - restart process runaway-worker" in out
+    assert isinstance(result, agent.ActionResult)
+    assert result.ok and result.status == "success" and result.error == ""
+    assert result.action == "restart process runaway-worker"
+    assert result.details == {
+        "process": "runaway-worker", "old_pid": 1842, "new_pid": 2107, "cpu_percent": 12, "simulated": True,
+    }
+
+
+def test_simulation_does_not_really_wait_or_touch_processes(monkeypatch):
+    import os
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda s: pytest.fail("simulation must not sleep"))
+    monkeypatch.setattr(os, "kill", lambda *a: pytest.fail("simulation must not signal a process"))
+    agent.call_tool("execute_action", action=RESTART, approved=True)
+
+
+def test_other_process_names_get_a_steady_simulation(capsys):
+    first = agent.call_tool("execute_action", action="restart the service 'billing-api'", approved=True)
+    second = agent.call_tool("execute_action", action="Restart service billing-api", approved=True)
+    assert first.status == "success"
+    assert first.details == second.details  # same name, same made-up numbers
+    assert first.details["new_pid"] == first.details["old_pid"] + 265
+    assert "billing-api" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("action", [
+    "restart the process 'runaway-worker' on the web server (runbook: High CPU on web servers)",
+    "please restart worker runaway-worker",
+    "restart runaway-worker",
+])
+def test_known_restart_wordings_are_understood(action):
+    assert agent.parse_action(action) == ("restart", "runaway-worker")
+
+
+@pytest.mark.parametrize("action", [
+    "restart the offending worker",
+    "delete the database",
+    "roll back the release",
+    "",
+])
+def test_unknown_action_is_a_named_error_and_prints_no_steps(action, capsys):
+    with pytest.raises(agent.AgentError) as e:
+        agent.call_tool("execute_action", action=action, approved=True)
+    assert e.value.name == "UNKNOWN_ACTION"
+    assert "UNKNOWN_ACTION" in str(e.value)
+    assert "[simulated]" not in capsys.readouterr().out
+
+
+def test_unknown_action_approved_by_the_human_is_still_a_named_error(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    with pytest.raises(agent.AgentError) as e:
+        agent.run_agent("fix", client=action_client("delete the database"), ask=make_asker("y"))
+    assert e.value.name == "UNKNOWN_ACTION"
+    assert "[simulated]" not in capsys.readouterr().out
+
+
+def test_main_prints_the_unknown_action_error(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    monkeypatch.setattr(agent, "make_client", lambda: action_client("delete the database"))
+    agent.main(["fix"], ask=make_asker("y"))
+    assert "UNKNOWN_ACTION" in capsys.readouterr().out
+
+
+def test_protected_process_is_a_failure_result(capsys):
+    result = agent.call_tool("execute_action", action="restart the process 'sshd'", approved=True)
+    assert result.status == "failure" and not result.ok
+    assert result.error == "PROTECTED_PROCESS"
+    assert "SIGTERM" not in capsys.readouterr().out
+
+
+def test_denied_action_never_reaches_execution(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    reached = []
+    monkeypatch.setitem(agent.TOOLS, "execute_action", lambda **kw: reached.append(kw))
+    for answer in ["n", "", "maybe"]:
+        result = agent.run_agent("fix cpu", client=action_client(), ask=make_asker(answer))
+        assert result == "denied"
+    assert reached == []
+    assert "[simulated]" not in capsys.readouterr().out
+
+
+def test_forced_action_denied_never_reaches_execution(monkeypatch):
+    reached = []
+    monkeypatch.setitem(agent.TOOLS, "execute_action", lambda **kw: reached.append(kw))
+    assert agent.run_forced_action(ask=make_asker("n")) == "denied"
+    assert reached == []
+
+
+def test_the_forced_sample_action_is_a_known_action():
+    assert agent.parse_action(agent.SAMPLE_ACTION) == ("restart", "runaway-worker")
+
+
+# ---- Tool-call log ---------------------------------------------------------
+
+def read_log():
+    return agent.LOG_FILE.read_text().splitlines()
+
+
+def test_a_search_call_is_logged_with_timestamp_args_and_top_result(monkeypatch):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    client = FakeClient(tool_reply("search_runbooks", {"query": "cpu"}), text_reply("done"))
+    agent.run_agent("cpu high", client=client)
+    lines = read_log()
+    assert len(lines) == 1
+    stamp, tool, args, summary = lines[0].split(" | ")
+    assert datetime.fromisoformat(stamp)  # a real ISO timestamp
+    assert tool == "search_runbooks"
+    assert args == 'args={"query": "cpu"}'
+    assert 'top="High CPU on web servers" score=0.400' in summary
+
+
+def test_denied_and_approved_actions_are_logged():
+    agent.run_gated_action("restart the process 'runaway-worker'", ask=make_asker("n"))
+    agent.run_gated_action("restart the process 'runaway-worker'", ask=make_asker("y"))
+    denied, approved = read_log()
+    assert denied.endswith("| denied") and "execute_action" in denied
+    assert "runaway-worker" in approved and "approved, result=" in approved
+
+
+def test_the_log_is_appended_not_overwritten(monkeypatch):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    agent.call_tool("search_runbooks", query="one")
+    agent.call_tool("search_runbooks", query="two")
+    lines = read_log()
+    assert len(lines) == 2 and '"one"' in lines[0] and '"two"' in lines[1]
+
+
+def test_a_named_error_is_logged():
+    with pytest.raises(agent.AgentError):
+        agent.call_tool("launch_missiles", target="moon")
+    assert "error=UNKNOWN_TOOL" in read_log()[0]
+
+
+def test_a_log_problem_never_breaks_the_agent(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(agent, "LOG_FILE", tmp_path / "no_such_folder" / "agent.log")
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
+    assert agent.call_tool("search_runbooks", query="cpu") == RESULTS
+    assert "LOG_WRITE_FAILED" in capsys.readouterr().err

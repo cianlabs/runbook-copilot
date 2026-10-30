@@ -34,7 +34,7 @@ EXPECTED_SECTIONS = {
 def test_chunking_produces_multiple_pieces():
     chunks = retrieve.build_chunks()
     assert len(chunks) > 1
-    assert {c["source"] for c in chunks} == set(EXPECTED_SECTIONS)
+    assert {c["source"] for c in chunks} >= set(EXPECTED_SECTIONS)
 
 
 def test_chunk_sizes_are_reasonable():
@@ -107,7 +107,7 @@ def test_every_section_is_covered():
     found = {}
     for c in retrieve.build_chunks():
         found.setdefault(c["source"], set()).add(c["section"])
-    assert found == EXPECTED_SECTIONS
+    assert {k: v for k, v in found.items() if k in EXPECTED_SECTIONS} == EXPECTED_SECTIONS
 
 
 def test_there_are_at_least_four_runbook_files():
@@ -156,3 +156,81 @@ def test_dns_query_returns_the_full_section_first():
     results = retrieve.search("DNS name not resolved")
     assert results[0]["section"] == "DNS lookup failures"
     assert results[0]["text"].startswith("Symptom:")
+
+
+# ---- Incident runbooks adapted from public GitHub issues ----------------------
+
+def incident_files():
+    return sorted(retrieve.RUNBOOK_DIR.glob("incident_*.txt"))
+
+
+def test_there_are_twelve_to_fifteen_incident_runbooks():
+    assert 12 <= len(incident_files()) <= 15
+
+
+def test_each_incident_runbook_has_symptom_fix_and_source_sections():
+    for path in incident_files():
+        sections = retrieve.split_sections(path.read_text())
+        assert len(sections) == 3, path.name
+        title = sections[0][0]
+        assert sections[0][1].strip().startswith("Symptom:"), path.name
+        assert sections[1][0] == f"Fix for {title}", path.name
+        assert sections[2][0] == f"Source for {title}", path.name
+
+
+def test_each_incident_runbook_credits_its_public_issue():
+    for path in incident_files():
+        text = path.read_text()
+        assert "Adapted from https://github.com/" in text and "/issues/" in text, path.name
+
+
+def test_incident_section_titles_are_unique_across_all_runbooks():
+    titles = []
+    for name, text in retrieve.load_runbooks():
+        titles += [h for h, _ in retrieve.split_sections(text)]
+    assert len(titles) == len(set(titles))
+
+
+def test_no_chunk_mixes_sections_in_any_runbook():
+    for name, text in retrieve.load_runbooks():
+        sections = {h: " ".join(b.split()) for h, b in retrieve.split_sections(text)}
+        for c in retrieve.build_chunks():
+            if c["source"] == name:
+                assert c["text"] in sections[c["section"]]
+                for h in sections:  # another section's header must never leak in
+                    if h != c["section"]:
+                        assert h not in c["text"]
+
+
+@pytest.mark.parametrize("query, source", [
+    ("CoreDNS i/o timeout pods fail name lookups", "incident_005_coredns-io-timeout.txt"),
+    ("etcd database space exceeded", "incident_006_etcd-space-exceeded.txt"),
+    ("yum lockfile held by another process", "incident_013_ansible-yum-lockfile.txt"),
+    ("image pull x509 certificate signed by unknown authority", "incident_001_k8s-image-pull-x509.txt"),
+])
+def test_queries_find_the_incident_runbooks(query, source):
+    results = retrieve.search(query)
+    assert results and results[0]["source"] == source
+
+
+# ---- Word endings: related forms must match ----------------------------------
+
+@pytest.mark.parametrize("words", [
+    ("deploy", "deploys", "deployed", "deployment", "deploying"),
+    ("fail", "fails", "failed", "failing", "failure"),
+    ("release", "releases"),
+    ("run", "running"),
+])
+def test_related_word_forms_share_one_stem(words):
+    assert len({retrieve.stem(w) for w in words}) == 1
+
+
+def test_short_words_are_left_alone():
+    assert retrieve.stem("is") == "is" and retrieve.stem("bus") == "bus"
+
+
+def test_deployment_failed_finds_the_deployment_runbook_first():
+    # Regression: the incident runbooks all say "failed", and without word endings
+    # they used to outrank deployment_failures.txt for this exact query.
+    results = retrieve.search("deployment failed")
+    assert results and results[0]["source"] == "deployment_failures.txt"

@@ -1,0 +1,12 @@
+# Template error missing end of comment tag when output contains a hash
+
+Symptom: a task fails with "template error while templating string: Missing end of comment tag" when it prints or reuses command output.
+The data contains characters such as {# that Jinja2 reads as the start of a template comment.
+
+# Fix for Template error missing end of comment tag when output contains a hash
+
+Tell Ansible not to template the data. For values defined in variables, mark them with the !unsafe YAML tag. For text written directly in a template, wrap it in raw and endraw blocks. Some users only needed to remove the hash character. Rerun the task and confirm the text comes out unchanged.
+
+# Source for Template error missing end of comment tag when output contains a hash
+
+Adapted from https://github.com/ansible/ansible/issues/16443 (ansible/ansible, closed). Public issue text, condensed.

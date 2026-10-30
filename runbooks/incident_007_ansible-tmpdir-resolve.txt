@@ -1,0 +1,12 @@
+# Ansible fails to resolve remote temporary directory intermittently
+
+Symptom: tasks fail now and then with "failed to resolve remote temporary directory from ansible-tmp-..." after upgrading to Ansible 2.0.
+It was traced to a bad interaction between OpenSSH connection sharing and certain Linux kernel versions on the managed host.
+
+# Fix for Ansible fails to resolve remote temporary directory intermittently
+
+Maintainers closed it as not an Ansible bug, so the options are workarounds. Move the managed host to a kernel version that does not have the faulty change, or switch the connection to another transport such as paramiko. Rerun the playbook to confirm the error is gone. Expect it to come back after kernel updates if the underlying bug is still present.
+
+# Source for Ansible fails to resolve remote temporary directory intermittently
+
+Adapted from https://github.com/ansible/ansible/issues/13876 (ansible/ansible, closed). Public issue text, condensed.

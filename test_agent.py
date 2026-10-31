@@ -57,7 +57,7 @@ def test_results_are_returned_to_the_model_and_final_answer_is_used(monkeypatch)
     monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
     client = FakeClient(tool_reply("search_runbooks", {"query": "cpu"}, "abc"), text_reply("Restart the worker."))
     answer = agent.run_agent("cpu high", client=client)
-    assert answer == "Restart the worker."
+    assert answer.startswith("Restart the worker.")  # the model's sentence, plus the sources the loop adds
     second = client.calls[1]["messages"]
     tool_msg = second[-1]
     assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "abc"
@@ -257,7 +257,7 @@ def test_without_the_flag_the_model_path_works_as_before(monkeypatch, capsys):
     monkeypatch.setattr(agent, "make_client", lambda: client)
     result = agent.main(["web", "server", "cpu", "is", "high"], ask=make_asker())
     out = capsys.readouterr().out
-    assert result == "Restart the worker."
+    assert result.startswith("Restart the worker.")
     assert "Model chose: search_runbooks" in out
     assert "Forced action" not in out
     assert len(client.calls) == 2  # the model was used: one to pick the tool, one to answer
@@ -429,3 +429,190 @@ def test_a_log_problem_never_breaks_the_agent(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
     assert agent.call_tool("search_runbooks", query="cpu") == RESULTS
     assert "LOG_WRITE_FAILED" in capsys.readouterr().err
+
+
+# ---- The multi-step loop: think, search, read, repeat or stop ----------------
+
+CPU = {"source": "rb.txt", "section": "High CPU on web servers", "text": "Restart the offending worker.", "score": 0.4}
+DISK = {"source": "rb.txt", "section": "Disk space almost full", "text": "Rotate the logs.", "score": 0.2}
+
+
+def cited_sources(answer):
+    """The section lines under the Sources block the loop added to the answer."""
+    block = answer.split("Sources:", 1)[1]
+    return [line[2:] for line in block.splitlines() if line.startswith("- ")]
+
+
+def test_the_loop_searches_reads_and_searches_again_then_stops(monkeypatch, capsys):
+    queries = []
+
+    def search(query):
+        queries.append(query)
+        if query == "cpu":
+            return [CPU, dict(CPU, text="A second chunk of the same section.")]  # same section twice
+        return [DISK, CPU]  # CPU was already read
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    first = tool_reply("search_runbooks", {"query": "cpu"}, "c1")
+    first.content = "The problem sounds like high CPU. I need that runbook."
+    second = tool_reply("search_runbooks", {"query": "disk"}, "c2")
+    second.content = "I have the CPU section. I still want the disk section."
+    client = FakeClient(first, second, text_reply("Restart the worker, then rotate the logs."))
+    answer = agent.run_agent("cpu is high and the disk is filling up", client=client)
+    out = capsys.readouterr().out
+
+    assert queries == ["cpu", "disk"]  # it repeated the search, then stopped
+    assert len(client.calls) == 3
+    # the model reads the previous results before the next step
+    assert "High CPU on web servers" in client.calls[1]["messages"][-1]["content"]
+    assert "Disk space almost full" in client.calls[2]["messages"][-1]["content"]
+    think1 = out.index("The problem sounds like high CPU")
+    chose1 = out.index("Model chose:")
+    read1 = out.index("Reading 2 result(s)")
+    think2 = out.index("I have the CPU section")
+    chose2 = out.index("Model chose:", chose1 + 1)
+    stop = out.index("Stop reason: ANSWERED")
+    assert think1 < chose1 < read1 < think2 < chose2 < stop
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert agent.last_trace.steps == 3
+    assert agent.last_trace.sources == [
+        {"source": "rb.txt", "section": "High CPU on web servers"},
+        {"source": "rb.txt", "section": "Disk space almost full"},
+    ]
+
+
+def test_the_answer_cites_only_the_sections_that_were_read(monkeypatch):
+    def search(query):
+        if query == "cpu":
+            return [CPU]
+        return [DISK]
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}, "c1"),
+        tool_reply("search_runbooks", {"query": "disk"}, "c2"),
+        text_reply("Restart the worker. Certificate expiry is a different problem."),
+    )
+    answer = agent.run_agent("cpu and disk", client=client)
+    assert cited_sources(answer) == [
+        "High CPU on web servers (rb.txt)",
+        "Disk space almost full (rb.txt)",
+    ]
+    assert cited_sources(agent.last_trace.answer) == cited_sources(answer)
+    # named in the model's prose, but never returned by search, so not a source
+    assert "Certificate expiry" not in cited_sources(answer)
+    assert "Certificate expiry" in answer.split("Sources:", 1)[0]
+
+
+def test_a_search_with_no_model_thought_still_says_what_it_needs(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = FakeClient(tool_reply("search_runbooks", {"query": "cpu"}), text_reply("Restart the worker."))
+    agent.run_agent("cpu high", client=client)
+    out = capsys.readouterr().out
+    assert "Thinking: I should search the runbooks for 'cpu'." in out
+    assert out.index("Thinking:") < out.index("Model chose:")
+
+
+def test_answering_without_a_search_is_answered_and_cites_nothing():
+    client = FakeClient(text_reply("Please give me more detail."))
+    answer = agent.run_agent("hi", client=client)
+    assert answer == "Please give me more detail."
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert agent.last_trace.sources == [] and agent.last_trace.steps == 1
+    assert "Sources:" not in answer
+
+
+def test_no_relevant_runbook_says_i_dont_know_and_does_not_guess(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "pancake recipe"}),
+        text_reply("SHOULD NOT BE USED: bake at 350."),
+    )
+    answer = agent.run_agent("how do I bake a cake", client=client)
+    out = capsys.readouterr().out
+    assert answer.startswith("I don't know")
+    assert "guess" in answer
+    assert "SHOULD NOT BE USED" not in answer
+    assert len(client.calls) == 1  # the model was not asked to invent an answer
+    assert agent.last_trace.stop_reason == agent.NO_RELEVANT_RUNBOOK
+    assert agent.last_trace.sources == []
+    assert "Stop reason: NO_RELEVANT_RUNBOOK" in out
+    assert "No relevant runbook sections found." in out
+
+
+def test_an_empty_later_search_does_not_wipe_sections_already_read(monkeypatch):
+    def search(query):
+        if query == "cpu":
+            return [CPU]
+        return []
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}, "c1"),
+        tool_reply("search_runbooks", {"query": "pancakes"}, "c2"),
+        text_reply("Restart the worker."),
+    )
+    answer = agent.run_agent("cpu high", client=client)
+    assert answer.startswith("Restart the worker.")
+    assert "I don't know" not in answer
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert cited_sources(answer) == ["High CPU on web servers (rb.txt)"]
+
+
+def test_max_steps_reached_stops_and_cites_what_was_read(monkeypatch, capsys):
+    monkeypatch.setattr(agent, "MAX_STEPS", 2)
+    queries = []
+
+    def search(query):
+        queries.append(query)
+        return [CPU] if query == "cpu" else [DISK]
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}, "c1"),
+        tool_reply("search_runbooks", {"query": "disk"}, "c2"),
+        text_reply("SHOULD NOT BE USED"),
+    )
+    answer = agent.run_agent("cpu and disk", client=client)
+    out = capsys.readouterr().out
+    assert queries == ["cpu", "disk"]
+    assert len(client.calls) == 2  # no extra model call after the limit
+    assert "SHOULD NOT BE USED" not in answer
+    assert agent.last_trace.stop_reason == agent.MAX_STEPS_REACHED
+    assert agent.last_trace.steps == 2
+    assert "Stop reason: MAX_STEPS_REACHED" in out
+    assert "Step 3" not in out
+    assert cited_sources(answer) == [
+        "High CPU on web servers (rb.txt)",
+        "Disk space almost full (rb.txt)",
+    ]
+
+
+def test_an_answer_on_the_last_allowed_step_is_answered_not_max_steps(monkeypatch):
+    monkeypatch.setattr(agent, "MAX_STEPS", 2)
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}),
+        text_reply("Restart the worker."),
+    )
+    answer = agent.run_agent("cpu high", client=client)
+    assert answer.startswith("Restart the worker.")
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert agent.last_trace.steps == 2
+    assert "maximum number of steps" not in answer
+
+
+def test_an_action_after_a_search_still_stops_at_the_approval_gate(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}, "c1"),
+        tool_reply("execute_action", {"action": RESTART}, "c2"),
+    )
+    result = agent.run_agent("cpu is high, restart the worker", client=client, ask=make_asker("n"))
+    out = capsys.readouterr().out
+    assert result == "denied"
+    assert agent.last_trace.stop_reason == agent.ACTION_REQUESTED
+    assert agent.last_trace.sources == [{"source": "rb.txt", "section": "High CPU on web servers"}]
+    assert "Stop reason: ACTION_REQUESTED" in out
+    assert "needs your approval" in out
+    assert "[simulated]" not in out

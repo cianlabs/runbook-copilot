@@ -8,6 +8,7 @@ Working end to end, with a stub for the action itself. `execute_action` only pri
 
 - Search: the `search_runbooks` tool uses `retrieve.py`, which splits each runbook at its `# ` headers first, then cuts each section into chunks (about 400 characters, 80 overlap) so a chunk never mixes sections. It ranks chunks with TF-IDF and returns the top 3 with scores.
 - Agent loop: `agent.py` asks the model (Grok, model `grok-build-0.1`, through the xAI API) one step at a time. The model thinks, calls `search_runbooks`, reads the sections, and can search again. It then writes a short plain-language answer and cites the sections that answer relies on, or stops for a named reason. See "The agent loop" below.
+- Graph: `graph_agent.py` is the same loop drawn as boxes and arrows. `agent.py` is unchanged. The page still uses the loop. See "The same loop, drawn as boxes" below.
 - Approval gate: the agent shows the proposed action and related runbook sections, then asks `Approve this action? (y/n)`. Only `y` or `yes` lets it through. The model cannot approve its own action. The local page uses the same rule: nothing runs until you click Approve, and that click only simulates the action.
 - Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. See "The page" below.
 
@@ -79,6 +80,45 @@ Before every model call the loop asks a small counter, `ModelCallBudget`, whethe
 
 An answer on the last allowed step is still `ANSWERED`. The cap stops extra calls. It does not throw away a real answer.
 
+## The same loop, drawn as boxes
+
+`agent.py` walks in a circle: think, search, read, then do that again or stop. `graph_agent.py` is the same work drawn as boxes and arrows. You stand in one box. The box tells you the next box. That kind of picture is called a state machine.
+
+The page still uses `agent.py`. Nothing there changed. The graph is a second copy so you can compare the two. It adds no packages. LangGraph is not used yet.
+
+```mermaid
+flowchart TD
+    startBox([Start]) --> PLAN
+    PLAN -->|Question| SEARCH
+    PLAN -->|Action request| ACTION_GATE
+    PLAN -->|Wrote an answer| CHECK
+    SEARCH --> CHECK
+    CHECK -->|Nothing matched| IDK
+    CHECK -->|Scores under 0.15| IDK
+    CHECK -->|Answer cites nothing| IDK
+    CHECK -->|Asking for more detail| ANSWER
+    CHECK -->|Strong sections| ANSWER
+    CHECK -->|Citations look good| ANSWER
+    ANSWER -->|Search again| SEARCH
+    ANSWER -->|Check the citations| CHECK
+    ANSWER -->|Save the reply| answered([Stop: ANSWERED])
+    IDK --> idkStop([Stop: I do not know])
+    ACTION_GATE --> actionStop([Stop: ACTION_REQUESTED])
+```
+
+- **PLAN** decides. A question goes to SEARCH. An action request goes to ACTION_GATE. A written answer goes to CHECK.
+- **SEARCH** calls the same `search_runbooks` tool as the loop.
+- **CHECK** applies the same guardrails. Nothing matched, every score under 0.15, or an answer that cites nothing: go to IDK. A real match goes to ANSWER.
+- **ANSWER** writes the reply and lists the sources.
+- **IDK** stops with that reason, or with the step limit.
+- **ACTION_GATE** asks a person y/n, the same way as today, and stops with `ACTION_REQUESTED`.
+
+The walker counts model calls. Four is the most (`MAX_STEPS`), the same cap as `agent.py`. A fifth call is not made. The stop is `MAX_STEPS_REACHED`.
+
+`run_graph` takes the same inputs as `run_agent` and returns the same kind of result. The extra piece is `graph_agent.last_trace.node_path`, the list of boxes it walked. A normal question walks PLAN, SEARCH, CHECK, ANSWER, CHECK, ANSWER. The first ANSWER asks for words. CHECK makes sure they cite a real section. The second ANSWER saves the reply.
+
+A longer plain-language tour is in [docs/graph.md](docs/graph.md).
+
 ## The page
 
 The page is `app.py`. It uses Python's built-in web server. Gradio, Streamlit, or Flask would mean another install for one form and two buttons. This page adds no packages, starts with one command, and the HTML sits in the same file so it is easy to read.
@@ -135,7 +175,7 @@ Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
 .venv/bin/python -m pytest -q
 ```
 
-147 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
+204 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
 
 ## Named failures
 
@@ -144,7 +184,7 @@ Errors have names that say what went wrong:
 - `retrieve.py`: NO_RUNBOOKS, EMPTY_QUERY, BAD_SETTINGS
 - `agent.py`: MISSING_KEY, BAD_KEY, MODEL_ERROR, BAD_TOOL_ARGS, EMPTY_REQUEST, UNKNOWN_TOOL, NOT_IMPLEMENTED_APPROVAL, UNKNOWN_ACTION
 - `app.py`: STALE_APPROVAL (the Approve click did not match the action that is waiting), APPROVAL_NEEDS_A_CLICK (the page tried to ask in the terminal instead of using the button), PORT_IN_USE, PORT_NOT_A_NUMBER
-- Stop reasons in `agent.py` are not crashes. They are ANSWERED, NO_RELEVANT_RUNBOOK, WEAK_MATCH_ONLY, UNGROUNDED_ANSWER, MAX_STEPS_REACHED, and ACTION_REQUESTED. See "The agent loop".
+- Stop reasons in `agent.py` are not crashes. They are ANSWERED, NO_RELEVANT_RUNBOOK, WEAK_MATCH_ONLY, UNGROUNDED_ANSWER, MAX_STEPS_REACHED, and ACTION_REQUESTED. See "The agent loop". `graph_agent.py` uses those same names.
 
 ## Known limits
 
@@ -155,3 +195,4 @@ Errors have names that say what went wrong:
 - A short request for more detail, with no steps, is still shown when nothing has been read. Any other reply in that spot is `UNGROUNDED_ANSWER`.
 - When a section was actually read, the loop does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.
 - Actions are still a simulation. The only known action is a restart.
+- The graph in `graph_agent.py` is a second copy of the loop, for comparison. If you change a guardrail, change it in both files, or the comparison tests will fail. The page still calls `agent.py`.

@@ -1,12 +1,22 @@
-"""runbook-copilot agent loop (scaffold).
+"""runbook-copilot agent loop.
 
 A language model reads the user's request and decides which tool to call.
-The loop runs search_runbooks for it, gives the results back, and prints the
-model's final answer. The model can ask for execute_action, but only a human
-can allow it: the agent shows the proposed action and asks y/n. Anything other
-than y or yes denies it. execute_action then SIMULATES the action: it parses
-the action text, prints realistic steps and returns an ActionResult. It never
-signals a real process, and it refuses to run unless the approval gate passed.
+It works in steps: think about what it needs, call search_runbooks, read the
+sections, then search again or answer. The answer names the runbook sections
+that search actually returned. Every run prints a stop reason and keeps the
+same record on last_trace, so you can see why the loop ended.
+
+The model can ask for execute_action, but only a human can allow it: the agent
+shows the proposed action and asks y/n. Anything other than y or yes denies it.
+execute_action then SIMULATES the action: it parses the action text, prints
+realistic steps and returns an ActionResult. It never signals a real process,
+and it refuses to run unless the approval gate passed.
+
+Stop reasons (printed as "Stop reason: <name>", also on last_trace.stop_reason):
+  ANSWERED              - the model had enough information and wrote an answer
+  NO_RELEVANT_RUNBOOK   - search found nothing relevant, so the answer is "I don't know"
+  MAX_STEPS_REACHED     - the loop hit MAX_STEPS before an answer and stopped
+  ACTION_REQUESTED      - the model asked for execute_action; the approval gate ran
 
 Testing the approval gate without the model:
   python agent.py --force-action   (or -f) skips the model and goes straight to
@@ -36,11 +46,22 @@ import retrieve
 
 MODEL = "grok-build-0.1"
 XAI_BASE_URL = "https://api.x.ai/v1"
+MAX_STEPS = 4  # model turns one question may take before the loop stops
+
+# Why the loop stopped. Always printed, and always stored on last_trace.
+ANSWERED = "ANSWERED"  # enough information; the model wrote an answer
+NO_RELEVANT_RUNBOOK = "NO_RELEVANT_RUNBOOK"  # nothing matched; do not guess
+MAX_STEPS_REACHED = "MAX_STEPS_REACHED"  # hit MAX_STEPS before an answer
+ACTION_REQUESTED = "ACTION_REQUESTED"  # execute_action; the approval gate decides
 
 SYSTEM_PROMPT = (
-    "You are a runbook assistant. To answer a problem, call search_runbooks with a "
-    "short, focused query. Answer only from what the search returns. If you think a "
-    "step should be carried out, call execute_action; a human must approve it first. "
+    "You are a runbook assistant. Work in steps. "
+    "On each step, first think about what you still need to know and write that thought in the message. "
+    "Then call search_runbooks with a short, focused query. "
+    "Read the sections that come back. If they are not enough, call search_runbooks again with a better query. "
+    "When you have enough to answer, stop calling tools and write the answer in plain text, from those sections only. "
+    "Do not invent runbook sections. If a search returns nothing relevant, say that you do not know. Do not guess. "
+    "If you think a step should be carried out, call execute_action; a human must approve it first. "
     "Write the action as: restart the process '<name>' (for example 'runaway-worker')."
 )
 
@@ -325,56 +346,172 @@ def run_forced_action(ask=input):
 
 # ---- The loop --------------------------------------------------------------
 
-def run_agent(request, client=None, ask=input):
-    """The model picks a tool; we run it; the model writes the final answer."""
-    if not request or not request.strip():
-        raise AgentError("EMPTY_REQUEST", "type a question or problem, e.g. 'web server CPU is high'.")
-    client = client or make_client()
+@dataclass
+class LoopTrace:
+    """What one question run did. stop_reason is always set.
 
-    # 1) send the request and the tool descriptions to the model
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": request},
-    ]
-    reply = ask_model(client, messages, tools=TOOL_SPECS)
+    sources lists the runbook sections search actually returned, in the order
+    they were first read. thoughts are what the model (or the search fallback)
+    said it needed before each tool call.
+    """
 
-    # The model answered without using a tool.
-    if not reply.tool_calls:
-        print(reply.content)
-        return reply.content
+    stop_reason: str
+    answer: str
+    sources: list
+    steps: int
+    thoughts: list = field(default_factory=list)
 
-    # 2) read which tool it chose and with what arguments
-    call = reply.tool_calls[0]
-    name = call.function.name
-    try:
-        arguments = json.loads(call.function.arguments or "{}")
-    except json.JSONDecodeError:
-        raise AgentError("BAD_TOOL_ARGS", f"the arguments for {name} were not valid JSON: {call.function.arguments!r}.")
-    print(f"Model chose: {name}({arguments})")
 
-    # 3) run it. execute_action goes through the human approval gate first.
-    if name == "execute_action":
-        action = arguments.get("action") if isinstance(arguments, dict) else None
-        if not isinstance(action, str) or not action.strip():
-            raise AgentError("BAD_TOOL_ARGS", f"execute_action needs an 'action' string: {arguments}.")
-        return run_gated_action(action, ask=ask)
-    results = call_tool(name, **arguments)
-    print_results(results)
+# Set when run_agent stops normally. Cleared at the start of each run, so a
+# named AgentError leaves None here instead of the previous question.
+last_trace = None
 
-    # 4) give the results back to the model for a final answer
+
+def thought_for(name, arguments, model_thought):
+    """What this step is looking for.
+
+    The model's own words win. A search with no thought still gets a plain
+    sentence, so the "think" step is visible even with a scripted model.
+    """
+    thought = (model_thought or "").strip()
+    if thought or name != "search_runbooks":
+        return thought
+    query = arguments.get("query") if isinstance(arguments, dict) else ""
+    return f"I should search the runbooks for {query!r}."
+
+
+def remember_sources(sources, results):
+    """Keep each runbook section that was actually read, once, in read order."""
+    seen = {(item["source"], item["section"]) for item in sources}
+    for result in results or []:
+        key = (result.get("source"), result.get("section"))
+        if not key[1] or key in seen:
+            continue
+        seen.add(key)
+        sources.append({"source": key[0], "section": key[1]})
+
+
+def show_answer(answer, sources):
+    """The answer plus a Sources block naming only the sections that were read."""
+    text = (answer or "").rstrip()
+    if not sources:
+        return text
+    lines = [text, "", "Sources:"] if text else ["Sources:"]
+    for item in sources:
+        lines.append(f"- {item['section']} ({item['source']})")
+    return "\n".join(lines)
+
+
+def record_stop(stop_reason, answer, sources, steps, thoughts):
+    """Remember why the loop stopped, and print that name. Returns the answer text."""
+    global last_trace
+    shown = show_answer(answer, sources)
+    last_trace = LoopTrace(
+        stop_reason, shown, [dict(item) for item in sources], steps, list(thoughts),
+    )
+    print(f"Stop reason: {stop_reason}")
+    return shown
+
+
+def append_tool_result(messages, reply, call, results):
+    """Hand one tool result back so the model can read it on the next step."""
     messages.append({
         "role": "assistant",
         "content": reply.content,
         "tool_calls": [{
             "id": call.id,
             "type": "function",
-            "function": {"name": name, "arguments": call.function.arguments},
+            "function": {"name": call.function.name, "arguments": call.function.arguments},
         }],
     })
     messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(results)})
-    final = ask_model(client, messages)
-    print(f"Answer: {final.content}")
-    return final.content
+
+
+def run_agent(request, client=None, ask=input):
+    """Think, search, read, then repeat or stop.
+
+    The model's own sentence is kept. When search ran, the returned answer
+    also lists the sections that were read. execute_action still goes through
+    the approval gate and is not run from this loop. last_trace always holds
+    the stop reason when this function returns normally.
+    """
+    global last_trace
+    last_trace = None
+    if not request or not request.strip():
+        raise AgentError("EMPTY_REQUEST", "type a question or problem, e.g. 'web server CPU is high'.")
+    client = client or make_client()
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": request},
+    ]
+    sources = []
+    thoughts = []
+
+    for step in range(1, MAX_STEPS + 1):
+        # 1) ask the model what it needs, or whether it can answer now
+        print(f"Step {step} of {MAX_STEPS}")
+        reply = ask_model(client, messages, tools=TOOL_SPECS)
+
+        # No tool call: the model has enough information (or chose not to search).
+        if not getattr(reply, "tool_calls", None):
+            shown = record_stop(ANSWERED, reply.content or "", sources, step, thoughts)
+            if sources:
+                print(f"Answer: {shown}")
+                return shown
+            print(reply.content)  # same wording as before, when nothing was read
+            return reply.content
+
+        # 2) read which tool it chose. One tool call per step; the first one is used.
+        call = reply.tool_calls[0]
+        name = call.function.name
+        try:
+            arguments = json.loads(call.function.arguments or "{}")
+        except json.JSONDecodeError:
+            raise AgentError(
+                "BAD_TOOL_ARGS",
+                f"the arguments for {name} were not valid JSON: {call.function.arguments!r}.",
+            )
+        thought = thought_for(name, arguments, reply.content)
+        if thought:
+            thoughts.append(thought)
+            print(f"Thinking: {thought}")
+        print(f"Model chose: {name}({arguments})")
+
+        # execute_action is never run here. The human approval gate decides.
+        if name == "execute_action":
+            action = arguments.get("action") if isinstance(arguments, dict) else None
+            if not isinstance(action, str) or not action.strip():
+                raise AgentError("BAD_TOOL_ARGS", f"execute_action needs an 'action' string: {arguments}.")
+            record_stop(ACTION_REQUESTED, action, sources, step, thoughts)
+            return run_gated_action(action, ask=ask)
+
+        # 3) run the tool and read what came back
+        results = call_tool(name, **arguments)
+        if results:
+            print(f"Reading {len(results)} result(s) from the runbooks.")
+        print_results(results)
+
+        # Nothing relevant anywhere in this run: say so, and do not let the model guess.
+        if name == "search_runbooks" and not results and not sources:
+            answer = "I don't know. No relevant runbook sections were found, so I will not guess."
+            shown = record_stop(NO_RELEVANT_RUNBOOK, answer, sources, step, thoughts)
+            print(f"Answer: {shown}")
+            return shown
+
+        if name == "search_runbooks":
+            remember_sources(sources, results)
+        append_tool_result(messages, reply, call, results)
+        # 4) loop: the next step can search again, answer, or ask for an action
+
+    # Every allowed step used a tool. Stop instead of calling the model forever.
+    answer = (
+        f"I stopped because I reached the maximum number of steps ({MAX_STEPS}). "
+        "I will not guess beyond the runbook sections I already read."
+    )
+    shown = record_stop(MAX_STEPS_REACHED, answer, sources, MAX_STEPS, thoughts)
+    print(f"Answer: {shown}")
+    return shown
 
 
 def main(argv=None, ask=input):

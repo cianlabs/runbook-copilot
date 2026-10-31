@@ -228,7 +228,7 @@ def agent_loop():
         "Only sections that search_runbooks actually returned can be cited. A title that was never read is never listed.",
         "A section is cited when its best score is 0.15 or higher, or when the answer names that section's title.",
         "A weak extra hit (for example High swap usage at 0.085) is left off, unless the answer uses it by name.",
-        "If something was read, Sources is never empty: the highest-scoring section is kept. Nothing read means no Sources line.",
+        "If every score is under 0.15, the loop does not answer (WEAK_MATCH_ONLY) and Sources stays empty.",
     ]
     y = 800
     for bullet in bullets:
@@ -384,11 +384,82 @@ def stop_reasons():
     c.save("stop-reasons.png")
 
 
+def guardrails():
+    """Week 4: I-don't-know stops, the hard step cap, and the local page."""
+    c = Canvas(1600, 1180)
+    header(
+        c,
+        "Guardrails and the page",
+        "The copilot says it does not know rather than guess. It cannot take more than 4 steps. A person clicks before anything runs.",
+    )
+
+    c.label((48, 150), "Three ways it refuses to guess")
+    cards = [
+        (RED, "NO_RELEVANT_RUNBOOK", "Search returned nothing. The reply is \"I don't know\". No Sources list. The model is not asked to invent steps."),
+        (ORANGE, "WEAK_MATCH_ONLY", "Every score was under 0.15, and nothing stronger was read earlier. Too weak to trust. No Sources list."),
+        (PURPLE, "UNGROUNDED_ANSWER", "The model wrote steps before reading a section. Those words are thrown away. A short \"more detail\" question can still be shown."),
+    ]
+    left, right = 48, 1552
+    gap = 18
+    width = (right - left - gap * 2) / 3
+    x = left
+    for colors, title, body in cards:
+        c.card((x, 186, x + width, 400), colors[0], colors[1], title, body, title_fill=colors[2], title_size=16, body_size=15)
+        x += width + gap
+
+    c.label((48, 432), "The hard step cap")
+    c.card(
+        (48, 468, 1552, 640),
+        YELLOW[0],
+        YELLOW[1],
+        "MAX_STEPS = 4, checked before every model call",
+        "The loop counts model turns. When the count is already 4, it does not call the model again. A model that would search forever still stops. The stop reason is MAX_STEPS_REACHED, and the message says it will not guess past the sections it already read.",
+        title_fill=ORANGE[2],
+        title_size=20,
+        body_size=16,
+    )
+
+    c.label((48, 672), "The local page")
+    page = [
+        (BLUE, "1. Ask", "One command starts the page. Type the problem in ordinary words. No terminal needed."),
+        (GREEN, "2. Read the result", "Numbered steps, the Sources list, the stop reason in plain words, and the step-by-step trace."),
+        (YELLOW, "3. Click to approve", "If it proposes an action, nothing runs until Approve. Do not run refuses. The run is only a simulation."),
+    ]
+    box_w = (right - left - gap * 2) / 3
+    x = left
+    for colors, title, body in page:
+        c.card((x, 708, x + box_w, 900), colors[0], colors[1], title, body, title_size=18, body_size=15)
+        x += box_w + gap
+    mid = 708 + 96
+    # arrows between the three page cards
+    x = left
+    for i in range(2):
+        c.arrow_right(x + box_w + 2, x + box_w + gap - 2, mid)
+        x += box_w + gap
+
+    c.label((48, 932), "What the page will not do")
+    notes = [
+        "No API key on screen. Practice mode runs with a built-in model when XAI_API_KEY is unset. Live mode reads the key from the terminal and does not print it.",
+        "The Approve button is a separate click. Opening the page, or asking a question, never runs the action.",
+        "A weak match can still be printed in the trace so you can see why it was refused. It is not a citation.",
+    ]
+    y = 968
+    for note in notes:
+        c.rounded((56, y + 6, 68, y + 18), TEAL[1], TEAL[1], radius=6, width=1)
+        lines = c.wrap(note, 16, 1460)
+        for line in lines:
+            c.text((80, y), line, 16, MUTED)
+            y += 24
+        y += 8
+    c.save("guardrails.png")
+
+
 def main():
     agent_loop()
     approval_gate()
     stop_reasons()
-    print("Wrote images/agent-loop.png, images/approval-gate.png, images/stop-reasons.png")
+    guardrails()
+    print("Wrote images/agent-loop.png, images/approval-gate.png, images/stop-reasons.png, images/guardrails.png")
 
 
 if __name__ == "__main__":

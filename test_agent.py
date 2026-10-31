@@ -659,8 +659,14 @@ def test_a_section_named_in_the_answer_but_never_read_is_not_cited(monkeypatch):
     assert "Certificate expiry" not in cited_sources(answer)
 
 
-def test_the_best_read_section_is_kept_when_every_score_is_low(monkeypatch):
-    """Something was read, so Sources is not empty, even under the cutoff."""
+def test_only_weak_matches_do_not_become_an_answer(monkeypatch, capsys):
+    """Scores under CITE_MIN_SCORE are not enough to answer or to cite.
+
+    Week 3 kept the highest weak section so Sources was never empty. Week 4
+    treats that as a guess: the model is not asked to write steps, and the
+    weak titles are not listed as sources. They are still printed, so you
+    can see why the guardrail fired.
+    """
     weak = {
         "source": "memory_leaks.txt", "section": "High swap usage",
         "text": "See which process is using swap.", "score": 0.08,
@@ -672,11 +678,19 @@ def test_the_best_read_section_is_kept_when_every_score_is_low(monkeypatch):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: [weak, weaker])
     client = FakeClient(
         tool_reply("search_runbooks", {"query": "memory"}),
-        text_reply("Free some memory on the box."),
+        text_reply("SHOULD NOT BE USED: Free some memory on the box."),
     )
     answer = agent.run_agent("the box is swapping", client=client)
-    assert cited_sources(answer) == ["High swap usage (memory_leaks.txt)"]
-    assert agent.last_trace.stop_reason == agent.ANSWERED
+    out = capsys.readouterr().out
+    assert answer.startswith("I don't know")
+    assert "too weak" in answer
+    assert "Sources:" not in answer
+    assert "SHOULD NOT BE USED" not in answer
+    assert "SHOULD NOT BE USED" not in out
+    assert "High swap usage" in out  # shown while debugging, not cited
+    assert agent.last_trace.sources == []
+    assert agent.last_trace.stop_reason == agent.WEAK_MATCH_ONLY
+    assert len(client.calls) == 1
 
 
 def test_nothing_relevant_has_no_citations_and_does_not_guess(monkeypatch):
@@ -703,6 +717,149 @@ def test_the_system_prompt_asks_for_a_short_plain_language_answer():
     assert "Do not invent sections." in prompt
     assert "say I don't know" in prompt
     assert "nothing relevant" in lowered
+
+
+def test_numbered_steps_without_a_read_section_are_not_shown(capsys):
+    client = FakeClient(text_reply("1. Restart the database.\n2. Delete every log."))
+    answer = agent.run_agent("the database is down", client=client)
+    out = capsys.readouterr().out
+    assert answer.startswith("I don't know")
+    assert "have not read a runbook section" in answer
+    assert "Restart the database" not in answer
+    assert "Delete every log" not in answer
+    assert "Restart the database" not in out
+    assert "Sources:" not in answer
+    assert agent.last_trace.stop_reason == agent.UNGROUNDED_ANSWER
+    assert agent.last_trace.sources == []
+    assert agent.last_trace.steps == 1
+
+
+def test_a_sources_list_written_by_the_model_is_replaced(monkeypatch):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}),
+        text_reply("Restart the worker.\n\nSources:\n- Certificate expiry (made-up.txt)"),
+    )
+    answer = agent.run_agent("cpu", client=client)
+    assert "Certificate expiry" not in answer
+    assert "made-up.txt" not in answer
+    assert cited_sources(answer) == ["High CPU on web servers (rb.txt)"]
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+
+
+def test_a_score_on_the_citation_line_is_strong_enough_to_answer(monkeypatch):
+    hit = {
+        "source": "rb.txt", "section": "High CPU on web servers",
+        "text": "Restart the offending worker.", "score": agent.CITE_MIN_SCORE,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [hit])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}),
+        text_reply("Restart the worker."),
+    )
+    answer = agent.run_agent("cpu high", client=client)
+    assert answer.startswith("Restart the worker.")
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert cited_sources(answer) == ["High CPU on web servers (rb.txt)"]
+
+
+def test_a_later_weak_search_does_not_erase_a_strong_section(monkeypatch):
+    weak = {
+        "source": "memory_leaks.txt", "section": "High swap usage",
+        "text": "See which process is using swap.", "score": 0.08,
+    }
+
+    def search(query):
+        if query == "cpu":
+            return [CPU]
+        return [weak]
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}, "c1"),
+        tool_reply("search_runbooks", {"query": "swap"}, "c2"),
+        text_reply("Restart the worker."),
+    )
+    answer = agent.run_agent("cpu high", client=client)
+    assert answer.startswith("Restart the worker.")
+    assert "I don't know" not in answer
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert cited_sources(answer) == ["High CPU on web servers (rb.txt)"]
+
+
+def test_the_step_budget_refuses_another_call_after_the_limit():
+    budget = agent.ModelCallBudget(2)
+    assert budget.allow() is True
+    assert budget.allow() is True
+    assert budget.allow() is False
+    assert budget.used == 2  # the refused call is not counted past the limit
+
+
+def test_max_steps_is_an_explicit_limit_of_four():
+    assert agent.MAX_STEPS == 4
+
+
+class ForeverClient:
+    """A model that would call search on every turn, forever."""
+
+    def __init__(self):
+        self.calls = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        call = tool_reply("search_runbooks", {"query": f"again {len(self.calls)}"})
+        return SimpleNamespace(choices=[SimpleNamespace(message=call)])
+
+
+def test_a_model_that_loops_forever_cannot_exceed_max_steps(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = ForeverClient()
+    answer = agent.run_agent("cpu high", client=client)
+    out = capsys.readouterr().out
+    assert len(client.calls) == agent.MAX_STEPS == 4
+    assert agent.last_trace.stop_reason == agent.MAX_STEPS_REACHED
+    assert agent.last_trace.steps == 4
+    assert "maximum number of steps (4)" in answer
+    assert "I will not guess" in answer
+    assert "Step 5" not in out
+    assert "Stop reason: MAX_STEPS_REACHED" in out
+    assert cited_sources(answer) == ["High CPU on web servers (rb.txt)"]
+
+
+def test_a_forever_model_stops_at_a_lower_cap_too(monkeypatch, capsys):
+    monkeypatch.setattr(agent, "MAX_STEPS", 3)
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = ForeverClient()
+    answer = agent.run_agent("cpu high", client=client)
+    out = capsys.readouterr().out
+    assert len(client.calls) == 3
+    assert agent.last_trace.steps == 3
+    assert agent.last_trace.stop_reason == agent.MAX_STEPS_REACHED
+    assert "maximum number of steps (3)" in answer
+    assert "Step 4" not in out
+
+
+def test_the_page_can_hold_an_action_without_running_it(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    ask = make_asker("y")  # would approve if the terminal gate ran
+    result = agent.run_agent("fix cpu", client=action_client(), ask=ask, defer_approval=True)
+    out = capsys.readouterr().out
+    assert isinstance(result, agent.PendingAction)
+    assert result.action == RESTART
+    assert ask.prompts == []
+    assert "[simulated]" not in out
+    assert "needs your approval" not in out
+    assert "Waiting for a person" in out
+    assert agent.last_trace.stop_reason == agent.ACTION_REQUESTED
+
+
+def test_settle_action_runs_only_when_approved_is_exactly_true(capsys):
+    assert agent.settle_action(RESTART, "yes") == "denied"
+    assert "[simulated]" not in capsys.readouterr().out  # the word "yes" is not approval
+    result = agent.settle_action(RESTART, True)
+    assert result.ok
+    assert "pid 1842" in capsys.readouterr().out
 
 
 def test_an_action_after_a_search_still_stops_at_the_approval_gate(monkeypatch, capsys):

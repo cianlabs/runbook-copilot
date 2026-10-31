@@ -17,8 +17,14 @@ and it refuses to run unless the approval gate passed.
 Stop reasons (printed as "Stop reason: <name>", also on last_trace.stop_reason):
   ANSWERED              - the model had enough information and wrote an answer
   NO_RELEVANT_RUNBOOK   - search found nothing relevant, so the answer is "I don't know"
+  WEAK_MATCH_ONLY       - search found only weak matches, so the answer is "I don't know"
+  UNGROUNDED_ANSWER     - the model tried to give steps before reading any section
   MAX_STEPS_REACHED     - the loop hit MAX_STEPS before an answer and stopped
-  ACTION_REQUESTED      - the model asked for execute_action; the approval gate ran
+  ACTION_REQUESTED      - the model asked for execute_action; a person still has to approve it
+
+WEAK_MATCH_ONLY and UNGROUNDED_ANSWER are the same idea as NO_RELEVANT_RUNBOOK:
+the runbooks do not support an answer, so the loop says "I don't know" and does
+not guess. They have their own names so a log shows which guardrail fired.
 
 Testing the approval gate without the model:
   python agent.py --force-action   (or -f) skips the model and goes straight to
@@ -48,18 +54,35 @@ import retrieve
 
 MODEL = "grok-build-0.1"
 XAI_BASE_URL = "https://api.x.ai/v1"
-MAX_STEPS = 4  # model turns one question may take before the loop stops
-# A read section at or above this score is cited. Search itself keeps weaker
-# hits (retrieve.MIN_SCORE is 0.05), and those weak tails were showing up as
-# Sources even when the answer did not use them. 0.15 sits above that tail
-# (a stray "High swap usage" hit scored 0.085) and below a real match.
+# Hard cap on model turns for one question. The loop reads this every run
+# (tests can change it) and checks it before every model call. A model that
+# keeps asking for tools forever still cannot take more turns than this.
+MAX_STEPS = 4
+# A read section at or above this score is strong enough to answer from and
+# to cite. Search itself keeps weaker hits (retrieve.MIN_SCORE is 0.05).
+# 0.15 sits above that tail (a stray "High swap usage" hit scored 0.085)
+# and below a real match. Scores under this line are too weak to answer from
+# when they are the only thing search returned.
 CITE_MIN_SCORE = 0.15
 
 # Why the loop stopped. Always printed, and always stored on last_trace.
 ANSWERED = "ANSWERED"  # enough information; the model wrote an answer
 NO_RELEVANT_RUNBOOK = "NO_RELEVANT_RUNBOOK"  # nothing matched; do not guess
+WEAK_MATCH_ONLY = "WEAK_MATCH_ONLY"  # only weak scores; do not guess
+UNGROUNDED_ANSWER = "UNGROUNDED_ANSWER"  # steps were written before any section was read
 MAX_STEPS_REACHED = "MAX_STEPS_REACHED"  # hit MAX_STEPS before an answer
-ACTION_REQUESTED = "ACTION_REQUESTED"  # execute_action; the approval gate decides
+ACTION_REQUESTED = "ACTION_REQUESTED"  # execute_action; a person still has to approve
+
+# Plain sentences for the page and the terminal. The code name stays on the
+# "Stop reason:" line so logs are easy to search.
+STOP_REASON_PLAIN = {
+    ANSWERED: "The copilot answered from the runbook sections it read.",
+    NO_RELEVANT_RUNBOOK: "The copilot does not know. Nothing in the runbooks matched, so it will not guess.",
+    WEAK_MATCH_ONLY: "The copilot does not know. The only matches were too weak to trust, so it will not guess.",
+    UNGROUNDED_ANSWER: "The copilot does not know. It tried to give steps before reading a runbook section, so it will not guess.",
+    MAX_STEPS_REACHED: "The copilot stopped because it used every step it is allowed. It will not keep going or guess.",
+    ACTION_REQUESTED: "The copilot wants to do something. Nothing has run. It waits for you to approve or refuse.",
+}
 
 SYSTEM_PROMPT = (
     "You are a runbook assistant. Work in steps. "
@@ -72,6 +95,8 @@ SYSTEM_PROMPT = (
     "Do not paste the runbook text back verbatim, and do not put that text under a bold title. "
     "Do not invent sections. "
     "If nothing relevant was found, say I don't know. Do not guess. "
+    "If you have not read a section yet, do not write numbered steps and do not invent a Sources list. "
+    "Ask for more detail, or say I don't know. "
     "If you think a step should be carried out, call execute_action; a human must approve it first. "
     "Write the action as: restart the process '<name>' (for example 'runaway-worker')."
 )
@@ -322,9 +347,13 @@ def print_results(results):
 
 # ---- Running an action behind the gate -------------------------------------
 
-def run_gated_action(action, ask=input):
-    """Ask a human, then run execute_action only if they said yes."""
-    if not approval_gate(action, ask=ask):
+def settle_action(action, approved):
+    """Run the simulation only when approved is exactly True. Anything else denies.
+
+    The terminal gate and the page's Approve button both end up here.
+    approved=True is set by our code after a person agrees, never by the model.
+    """
+    if approved is not True:
         print("Action denied. Nothing was run.")
         log_tool_call("execute_action", {"action": action}, "denied")
         return "denied"
@@ -338,6 +367,51 @@ def run_gated_action(action, ask=input):
     line = f"Result: {outcome.status} - {outcome.action}"
     print(line + (f" ({outcome.error})" if outcome.error else ""))
     return outcome
+
+
+def run_gated_action(action, ask=input):
+    """Ask a human, then run execute_action only if they said yes."""
+    return settle_action(action, approval_gate(action, ask=ask))
+
+
+@dataclass
+class PendingAction:
+    """An action the model asked for. Nothing has run yet.
+
+    The page returns this instead of asking y/n in the terminal. The action
+    runs only after a person clicks Approve, which calls settle_action.
+    """
+
+    action: str
+
+
+class ModelCallBudget:
+    """Counts model calls and refuses any call past the limit.
+
+    run_agent asks allow() before every model call. When allow() is False the
+    loop stops with MAX_STEPS_REACHED and does not call the model. A model
+    that would answer forever still cannot take more than `limit` turns.
+    """
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.used = 0
+
+    def allow(self):
+        """True if another model call is still allowed. That call is then counted."""
+        if self.used >= self.limit:
+            return False
+        self.used += 1
+        return True
+
+
+def max_steps_message(limit):
+    """What we tell the person when the hard cap stops the loop."""
+    return (
+        f"I stopped because I reached the maximum number of steps ({limit}). "
+        "I will not guess beyond the runbook sections I already read. "
+        "Ask a narrower question if you want another try."
+    )
 
 
 # A made-up action for trying the approval gate without the model.
@@ -371,6 +445,7 @@ class LoopTrace:
     sources: list
     steps: int
     thoughts: list = field(default_factory=list)
+    events: list = field(default_factory=list)  # step-by-step lines for the page
 
 
 # Set when run_agent stops normally. Cleared at the start of each run, so a
@@ -424,23 +499,76 @@ def answer_names_section(answer, section):
     return title.lower() in answer.lower()
 
 
+def best_score(results):
+    """Highest score in a search result list. Missing or broken scores count as 0."""
+    best = 0.0
+    for result in results or []:
+        try:
+            score = float(result.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if score > best:
+            best = score
+    return best
+
+
+def has_strong_support(results):
+    """True when some section scores at least CITE_MIN_SCORE.
+
+    That is the line between "the runbooks support an answer" and "these hits
+    are too weak to trust". A weak hit can still be printed so you can see it.
+    """
+    return best_score(results) >= CITE_MIN_SCORE
+
+
+def reply_is_only_asking_for_detail(text):
+    """True when the model is asking for more information, not giving steps.
+
+    A short question, or a short request such as "Please give me more detail.",
+    can be shown even when no section has been read. Numbered steps, a Sources
+    list, or any other reply is a guess. The loop replaces that guess.
+    """
+    raw = (text or "").strip()
+    if not raw or len(raw) > 120:
+        return False
+    if re.search(r"\d+\s*[\.\)]\s+\S", raw):
+        return False
+    lowered = raw.lower()
+    if "sources:" in lowered:
+        return False
+    if raw.endswith("?"):
+        return True
+    asking = ("more detail", "more information", "tell me more", "clarify")
+    return any(phrase in lowered for phrase in asking)
+
+
+def strip_model_sources(text):
+    """Drop a Sources block the model wrote. Only the citation rule may add one."""
+    if not text:
+        return ""
+    kept = []
+    for line in text.splitlines():
+        if line.strip().lower() in {"sources:", "sources"}:
+            break
+        kept.append(line)
+    return "\n".join(kept).rstrip()
+
+
 def citations_for(sources, answer):
     """Which read sections belong in Sources.
 
     A section can be cited only if search returned it. It is cited when its
     best score is at least CITE_MIN_SCORE, or when the answer names its title
-    (the reply drew from it even though the score was weak). If that would
-    cite nothing but something was read, the highest-scoring section is kept,
-    so a real read never drops every citation. Read order is preserved.
+    (the reply drew from it even though the score was weak). A weak section
+    the answer does not name is left off. If nothing qualifies, Sources is
+    empty: the loop does not invent a citation and does not keep a weak
+    section just to have one. Read order is preserved.
     """
     read = [item for item in sources if item.get("section")]
     chosen = [
         item for item in read
         if item.get("score", 0) >= CITE_MIN_SCORE or answer_names_section(answer, item["section"])
     ]
-    if not chosen and read:
-        best = max(item.get("score", 0) for item in read)
-        chosen = [item for item in read if item.get("score", 0) == best]
     return [{"source": item["source"], "section": item["section"]} for item in chosen]
 
 
@@ -455,15 +583,37 @@ def show_answer(answer, sources):
     return "\n".join(lines)
 
 
-def record_stop(stop_reason, answer, sources, steps, thoughts):
+def note_event(events, step, label, detail):
+    """One line of the step-by-step trace. The page shows these in order."""
+    events.append({"step": step, "label": label, "detail": detail})
+
+
+def describe_results(results):
+    """A short trace line for what search just returned."""
+    if not results:
+        return "No relevant sections."
+    top = results[0]
+    try:
+        score = float(top.get("score") or 0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return f"{len(results)} section(s). Top: {top.get('section')} ({score:.3f})."
+
+
+def record_stop(stop_reason, answer, sources, steps, thoughts, events=None):
     """Remember why the loop stopped, and print that name. Returns the answer text."""
     global last_trace
     cited = citations_for(sources, answer)
     shown = show_answer(answer, cited)
+    trace_events = list(events or [])
+    plain = STOP_REASON_PLAIN.get(stop_reason, "")
+    note_event(trace_events, steps, "Stopped", f"{stop_reason}. {plain}".strip())
     last_trace = LoopTrace(
-        stop_reason, shown, [dict(item) for item in cited], steps, list(thoughts),
+        stop_reason, shown, [dict(item) for item in cited], steps, list(thoughts), trace_events,
     )
     print(f"Stop reason: {stop_reason}")
+    if plain:
+        print(plain)
     return shown
 
 
@@ -481,13 +631,29 @@ def append_tool_result(messages, reply, call, results):
     messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(results)})
 
 
-def run_agent(request, client=None, ask=input):
+def tool_event_detail(name, arguments):
+    """A plain trace line for the tool the model just picked."""
+    if name == "search_runbooks":
+        query = arguments.get("query") if isinstance(arguments, dict) else ""
+        return f"search_runbooks for {query!r}."
+    if name == "execute_action":
+        action = arguments.get("action") if isinstance(arguments, dict) else ""
+        return f"execute_action: {action}"
+    return f"{name}({arguments})"
+
+
+def run_agent(request, client=None, ask=input, defer_approval=False):
     """Think, search, read, then repeat or stop.
 
-    The model's own sentence is kept. When search ran, the returned answer
-    also lists the sections the citation rule kept. execute_action still goes
-    through the approval gate and is not run from this loop. last_trace always
+    The model's own sentence is kept when it is grounded in a section that
+    was actually read. When search ran, the returned answer also lists the
+    sections the citation rule kept. execute_action still goes through a
+    person: the terminal asks y/n, unless defer_approval is True, in which
+    case the loop returns a PendingAction and runs nothing. last_trace always
     holds the stop reason when this function returns normally.
+
+    The model is never called more than MAX_STEPS times. The budget is checked
+    before every call, so a model that keeps requesting tools still stops.
     """
     global last_trace
     last_trace = None
@@ -501,20 +667,40 @@ def run_agent(request, client=None, ask=input):
     ]
     sources = []
     thoughts = []
+    events = []
+    # Built here, from the current MAX_STEPS, so a test can lower the cap.
+    budget = ModelCallBudget(MAX_STEPS)
 
-    for step in range(1, MAX_STEPS + 1):
+    while True:
+        # Hard stop. This runs before every model call. Do not call ask_model
+        # anywhere else in this loop.
+        if not budget.allow():
+            shown = record_stop(
+                MAX_STEPS_REACHED, max_steps_message(MAX_STEPS), sources, budget.used, thoughts, events,
+            )
+            print(f"Answer: {shown}")
+            return shown
+
+        step = budget.used
         # 1) ask the model what it needs, or whether it can answer now
         print(f"Step {step} of {MAX_STEPS}")
         reply = ask_model(client, messages, tools=TOOL_SPECS)
 
-        # No tool call: the model has enough information (or chose not to search).
+        # No tool call: answer only if a section was read, or this is a short
+        # request for more detail. Anything else would be a guess.
         if not getattr(reply, "tool_calls", None):
-            shown = record_stop(ANSWERED, reply.content or "", sources, step, thoughts)
+            text = strip_model_sources(reply.content or "")
+            if not sources and not reply_is_only_asking_for_detail(text):
+                answer = "I don't know. I have not read a runbook section, so I will not guess."
+                shown = record_stop(UNGROUNDED_ANSWER, answer, sources, step, thoughts, events)
+                print(f"Answer: {shown}")
+                return shown
+            shown = record_stop(ANSWERED, text, sources, step, thoughts, events)
             if sources:
                 print(f"Answer: {shown}")
                 return shown
-            print(reply.content)  # same wording as before, when nothing was read
-            return reply.content
+            print(text)  # a clarification, same wording as before, when nothing was read
+            return text
 
         # 2) read which tool it chose. One tool call per step; the first one is used.
         call = reply.tool_calls[0]
@@ -530,14 +716,20 @@ def run_agent(request, client=None, ask=input):
         if thought:
             thoughts.append(thought)
             print(f"Thinking: {thought}")
+            note_event(events, step, "Thinking", thought)
         print(f"Model chose: {name}({arguments})")
+        note_event(events, step, "Tool", tool_event_detail(name, arguments))
 
-        # execute_action is never run here. The human approval gate decides.
+        # execute_action is never run here. A person decides.
         if name == "execute_action":
             action = arguments.get("action") if isinstance(arguments, dict) else None
             if not isinstance(action, str) or not action.strip():
                 raise AgentError("BAD_TOOL_ARGS", f"execute_action needs an 'action' string: {arguments}.")
-            record_stop(ACTION_REQUESTED, action, sources, step, thoughts)
+            record_stop(ACTION_REQUESTED, action, sources, step, thoughts, events)
+            if defer_approval:
+                # The page shows the action and waits for a button. Nothing runs.
+                print("Action not run. Waiting for a person to approve it.")
+                return PendingAction(action)
             return run_gated_action(action, ask=ask)
 
         # 3) run the tool and read what came back
@@ -545,11 +737,19 @@ def run_agent(request, client=None, ask=input):
         if results:
             print(f"Reading {len(results)} result(s) from the runbooks.")
         print_results(results)
+        note_event(events, step, "Read", describe_results(results))
 
-        # Nothing relevant anywhere in this run: say so, and do not let the model guess.
-        if name == "search_runbooks" and not results and not sources:
-            answer = "I don't know. No relevant runbook sections were found, so I will not guess."
-            shown = record_stop(NO_RELEVANT_RUNBOOK, answer, sources, step, thoughts)
+        # Nothing strong enough to answer from: say so, and do not let the model guess.
+        # An empty later search does not come through here, because sources
+        # already holds a strong section from an earlier step.
+        if name == "search_runbooks" and not has_strong_support(results) and not has_strong_support(sources):
+            if not results and not sources:
+                answer = "I don't know. No relevant runbook sections were found, so I will not guess."
+                reason = NO_RELEVANT_RUNBOOK
+            else:
+                answer = "I don't know. The only runbook matches were too weak to trust, so I will not guess."
+                reason = WEAK_MATCH_ONLY
+            shown = record_stop(reason, answer, sources, step, thoughts, events)
             print(f"Answer: {shown}")
             return shown
 
@@ -557,15 +757,6 @@ def run_agent(request, client=None, ask=input):
             remember_sources(sources, results)
         append_tool_result(messages, reply, call, results)
         # 4) loop: the next step can search again, answer, or ask for an action
-
-    # Every allowed step used a tool. Stop instead of calling the model forever.
-    answer = (
-        f"I stopped because I reached the maximum number of steps ({MAX_STEPS}). "
-        "I will not guess beyond the runbook sections I already read."
-    )
-    shown = record_stop(MAX_STEPS_REACHED, answer, sources, MAX_STEPS, thoughts)
-    print(f"Answer: {shown}")
-    return shown
 
 
 def main(argv=None, ask=input):

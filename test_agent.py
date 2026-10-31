@@ -602,6 +602,109 @@ def test_an_answer_on_the_last_allowed_step_is_answered_not_max_steps(monkeypatc
     assert "maximum number of steps" not in answer
 
 
+def test_a_relevant_section_is_cited_and_a_weak_one_is_not(monkeypatch):
+    """Score cutoff: 0.494 is cited, 0.085 is read but not listed in Sources."""
+    strong = {
+        "source": "sample_runbook.txt", "section": "High CPU on web servers",
+        "text": "Restart the offending worker.", "score": 0.494,
+    }
+    weak = {
+        "source": "memory_leaks.txt", "section": "High swap usage",
+        "text": "See which process is using swap.", "score": 0.085,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [strong, weak])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "web server cpu"}),
+        text_reply("The web server is too busy. Restart the worker that is using the CPU."),
+    )
+    answer = agent.run_agent("web server CPU is at 95 percent", client=client)
+    assert cited_sources(answer) == ["High CPU on web servers (sample_runbook.txt)"]
+    assert "High swap usage" not in answer.split("Sources:", 1)[1]
+    assert agent.last_trace.sources == [
+        {"source": "sample_runbook.txt", "section": "High CPU on web servers"},
+    ]
+    # the weak section was still handed to the model; it is just not a citation
+    assert "High swap usage" in client.calls[1]["messages"][-1]["content"]
+
+
+def test_a_weak_section_is_cited_when_the_answer_names_it(monkeypatch):
+    strong = {
+        "source": "sample_runbook.txt", "section": "High CPU on web servers",
+        "text": "Restart the offending worker.", "score": 0.494,
+    }
+    weak = {
+        "source": "memory_leaks.txt", "section": "High swap usage",
+        "text": "See which process is using swap.", "score": 0.085,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [strong, weak])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}),
+        text_reply("Restart the worker. Also check High swap usage, because the box is swapping."),
+    )
+    answer = agent.run_agent("cpu and memory", client=client)
+    assert cited_sources(answer) == [
+        "High CPU on web servers (sample_runbook.txt)",
+        "High swap usage (memory_leaks.txt)",
+    ]
+
+
+def test_a_section_named_in_the_answer_but_never_read_is_not_cited(monkeypatch):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}),
+        text_reply("Restart the worker. This is not the Certificate expiry section."),
+    )
+    answer = agent.run_agent("cpu", client=client)
+    assert cited_sources(answer) == ["High CPU on web servers (rb.txt)"]
+    assert "Certificate expiry" not in cited_sources(answer)
+
+
+def test_the_best_read_section_is_kept_when_every_score_is_low(monkeypatch):
+    """Something was read, so Sources is not empty, even under the cutoff."""
+    weak = {
+        "source": "memory_leaks.txt", "section": "High swap usage",
+        "text": "See which process is using swap.", "score": 0.08,
+    }
+    weaker = {
+        "source": "rb.txt", "section": "Disk space almost full",
+        "text": "Rotate the logs.", "score": 0.06,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [weak, weaker])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "memory"}),
+        text_reply("Free some memory on the box."),
+    )
+    answer = agent.run_agent("the box is swapping", client=client)
+    assert cited_sources(answer) == ["High swap usage (memory_leaks.txt)"]
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+
+
+def test_nothing_relevant_has_no_citations_and_does_not_guess(monkeypatch):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "pancake recipe"}),
+        text_reply("SHOULD NOT BE USED: bake at 350."),
+    )
+    answer = agent.run_agent("how do I bake a cake", client=client)
+    assert "Sources:" not in answer
+    assert agent.last_trace.sources == []
+    assert agent.last_trace.stop_reason == agent.NO_RELEVANT_RUNBOOK
+    assert answer.startswith("I don't know")
+    assert "SHOULD NOT BE USED" not in answer
+    assert len(client.calls) == 1
+
+
+def test_the_system_prompt_asks_for_a_short_plain_language_answer():
+    prompt = agent.SYSTEM_PROMPT
+    lowered = prompt.lower()
+    assert "plain language" in lowered
+    assert "numbered steps" in lowered
+    assert "do not paste the runbook text back verbatim" in lowered
+    assert "Do not invent sections." in prompt
+    assert "say I don't know" in prompt
+    assert "nothing relevant" in lowered
+
+
 def test_an_action_after_a_search_still_stops_at_the_approval_gate(monkeypatch, capsys):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
     client = FakeClient(

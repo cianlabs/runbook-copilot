@@ -2,9 +2,11 @@
 
 A language model reads the user's request and decides which tool to call.
 It works in steps: think about what it needs, call search_runbooks, read the
-sections, then search again or answer. The answer names the runbook sections
-that search actually returned. Every run prints a stop reason and keeps the
-same record on last_trace, so you can see why the loop ended.
+sections, then search again or answer. The answer is a short plain-language
+reply. Its Sources list names the read sections the answer relies on (see
+the citation rule on CITE_MIN_SCORE), never a section search did not return.
+Every run prints a stop reason and keeps the same record on last_trace, so
+you can see why the loop ended.
 
 The model can ask for execute_action, but only a human can allow it: the agent
 shows the proposed action and asks y/n. Anything other than y or yes denies it.
@@ -47,6 +49,11 @@ import retrieve
 MODEL = "grok-build-0.1"
 XAI_BASE_URL = "https://api.x.ai/v1"
 MAX_STEPS = 4  # model turns one question may take before the loop stops
+# A read section at or above this score is cited. Search itself keeps weaker
+# hits (retrieve.MIN_SCORE is 0.05), and those weak tails were showing up as
+# Sources even when the answer did not use them. 0.15 sits above that tail
+# (a stray "High swap usage" hit scored 0.085) and below a real match.
+CITE_MIN_SCORE = 0.15
 
 # Why the loop stopped. Always printed, and always stored on last_trace.
 ANSWERED = "ANSWERED"  # enough information; the model wrote an answer
@@ -59,8 +66,12 @@ SYSTEM_PROMPT = (
     "On each step, first think about what you still need to know and write that thought in the message. "
     "Then call search_runbooks with a short, focused query. "
     "Read the sections that come back. If they are not enough, call search_runbooks again with a better query. "
-    "When you have enough to answer, stop calling tools and write the answer in plain text, from those sections only. "
-    "Do not invent runbook sections. If a search returns nothing relevant, say that you do not know. Do not guess. "
+    "When you have enough to answer, stop calling tools. "
+    "Write a short reply in plain language: a few numbered steps the person can follow. "
+    "Ground it only in the sections you read, and say it in your own words. "
+    "Do not paste the runbook text back verbatim, and do not put that text under a bold title. "
+    "Do not invent sections. "
+    "If nothing relevant was found, say I don't know. Do not guess. "
     "If you think a step should be carried out, call execute_action; a human must approve it first. "
     "Write the action as: restart the process '<name>' (for example 'runaway-worker')."
 )
@@ -350,9 +361,9 @@ def run_forced_action(ask=input):
 class LoopTrace:
     """What one question run did. stop_reason is always set.
 
-    sources lists the runbook sections search actually returned, in the order
-    they were first read. thoughts are what the model (or the search fallback)
-    said it needed before each tool call.
+    sources is the Sources list: sections search returned that the citation
+    rule kept, in the order they were first read. thoughts are what the model
+    (or the search fallback) said it needed before each tool call.
     """
 
     stop_reason: str
@@ -381,18 +392,60 @@ def thought_for(name, arguments, model_thought):
 
 
 def remember_sources(sources, results):
-    """Keep each runbook section that was actually read, once, in read order."""
-    seen = {(item["source"], item["section"]) for item in sources}
+    """Keep each runbook section that was actually read, once, in read order.
+
+    The best score for that section is kept. A later weaker chunk of the same
+    section does not pull it under the citation cutoff.
+    """
+    by_key = {(item["source"], item["section"]): item for item in sources}
     for result in results or []:
-        key = (result.get("source"), result.get("section"))
-        if not key[1] or key in seen:
+        section = result.get("section")
+        if not section:
             continue
-        seen.add(key)
-        sources.append({"source": key[0], "section": key[1]})
+        key = (result.get("source"), section)
+        try:
+            score = float(result.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        existing = by_key.get(key)
+        if existing is None:
+            item = {"source": key[0], "section": section, "score": score}
+            sources.append(item)
+            by_key[key] = item
+        elif score > existing["score"]:
+            existing["score"] = score
+
+
+def answer_names_section(answer, section):
+    """True when the reply text contains this section's title."""
+    title = (section or "").strip()
+    if len(title) < 3 or not answer:
+        return False
+    return title.lower() in answer.lower()
+
+
+def citations_for(sources, answer):
+    """Which read sections belong in Sources.
+
+    A section can be cited only if search returned it. It is cited when its
+    best score is at least CITE_MIN_SCORE, or when the answer names its title
+    (the reply drew from it even though the score was weak). If that would
+    cite nothing but something was read, the highest-scoring section is kept,
+    so a real read never drops every citation. Read order is preserved.
+    """
+    read = [item for item in sources if item.get("section")]
+    chosen = [
+        item for item in read
+        if item.get("score", 0) >= CITE_MIN_SCORE or answer_names_section(answer, item["section"])
+    ]
+    if not chosen and read:
+        best = max(item.get("score", 0) for item in read)
+        chosen = [item for item in read if item.get("score", 0) == best]
+    return [{"source": item["source"], "section": item["section"]} for item in chosen]
 
 
 def show_answer(answer, sources):
-    """The answer plus a Sources block naming only the sections that were read."""
+    """The answer plus a Sources block naming the cited sections."""
     text = (answer or "").rstrip()
     if not sources:
         return text
@@ -405,9 +458,10 @@ def show_answer(answer, sources):
 def record_stop(stop_reason, answer, sources, steps, thoughts):
     """Remember why the loop stopped, and print that name. Returns the answer text."""
     global last_trace
-    shown = show_answer(answer, sources)
+    cited = citations_for(sources, answer)
+    shown = show_answer(answer, cited)
     last_trace = LoopTrace(
-        stop_reason, shown, [dict(item) for item in sources], steps, list(thoughts),
+        stop_reason, shown, [dict(item) for item in cited], steps, list(thoughts),
     )
     print(f"Stop reason: {stop_reason}")
     return shown
@@ -431,9 +485,9 @@ def run_agent(request, client=None, ask=input):
     """Think, search, read, then repeat or stop.
 
     The model's own sentence is kept. When search ran, the returned answer
-    also lists the sections that were read. execute_action still goes through
-    the approval gate and is not run from this loop. last_trace always holds
-    the stop reason when this function returns normally.
+    also lists the sections the citation rule kept. execute_action still goes
+    through the approval gate and is not run from this loop. last_trace always
+    holds the stop reason when this function returns normally.
     """
     global last_trace
     last_trace = None

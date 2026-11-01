@@ -5,7 +5,7 @@ This file is the same work as a picture. Each box does one small job and
 returns the name of the next box. A walker follows those names until a box
 says "stop". People call this kind of picture a state machine.
 
-`agent.py` stays as it is. The page still uses it. This file is a second copy
+The page still uses `agent.py`. This file is a second copy of the same rules
 so the two can be compared. It uses the same tools, the same stop reasons, and
 the same named errors. LangGraph can come later. It is not used here.
 
@@ -37,7 +37,9 @@ What each box does:
 - SEARCH: call the existing `search_runbooks` tool.
 - CHECK: the guardrails. Nothing matched is NO_RELEVANT_RUNBOOK. Every score
   under 0.15 is WEAK_MATCH_ONLY. An answer that cites nothing is
-  UNGROUNDED_ANSWER. A real match goes on to ANSWER.
+  UNGROUNDED_ANSWER. A real match goes on to ANSWER. Two searches in a row
+  that are both empty, or both weak, also go to IDK. That stops a model
+  that only changes the words.
 - ANSWER: write the reply from the sections that were read, then list sources.
 - IDK: stop with the reason CHECK chose, or with MAX_STEPS_REACHED.
 - ACTION_GATE: the same human y/n question as today. Stop with ACTION_REQUESTED.
@@ -120,6 +122,8 @@ class GraphState:
     action: str = ""
     draft_answer: str = ""
     has_draft: bool = False  # True once the model has written an answer
+    # "strong", "weak", or "none" for the search before this one. "" means none yet.
+    last_search_quality: str = ""
     stop_reason: str = ""
     answer_text: str = ""
     steps: int = 0
@@ -166,9 +170,15 @@ def save_trace(state, stop_reason, answer_text):
 
 
 def stop_at_limit(state):
-    """The counter is full. Stop instead of calling the model again."""
+    """The counter is full. Stop instead of calling the model again.
+
+    If no strong section was read, say we could not find this in the
+    runbooks. The stop reason stays MAX_STEPS_REACHED either way.
+    """
+    answer, sources = agent.step_limit_answer(state.sources, MAX_STEPS)
     state.stop_reason = agent.MAX_STEPS_REACHED
-    state.answer_text = agent.max_steps_message(MAX_STEPS)
+    state.answer_text = answer
+    state.sources = sources
     if not state.node_path or state.node_path[-1] != "IDK":
         state.node_path.append("IDK")
     idk(state)
@@ -269,6 +279,9 @@ def check(state):
     Every score under 0.15, and nothing stronger was read earlier -> WEAK_MATCH_ONLY.
     An answer that cites nothing -> UNGROUNDED_ANSWER.
     A short "please give me more detail" is not a guess. It may be shown.
+    Two searches in a row that are both empty, or both only weak, also stop.
+    That is the same "I don't know" idea. It does not depend on the model
+    deciding to stop.
     """
     if state.has_draft:
         if not state.sources and agent.reply_is_only_asking_for_detail(state.draft_answer):
@@ -286,7 +299,8 @@ def check(state):
             return "IDK"
         return "ANSWER"
 
-    # Just searched. Do not let a weak or empty result become an answer.
+    # Just searched. Do not let a weak or empty result become an answer
+    # when nothing stronger was read earlier. This is the first weak search.
     if not agent.has_strong_support(state.results) and not agent.has_strong_support(state.sources):
         if not state.results and not state.sources:
             state.stop_reason = agent.NO_RELEVANT_RUNBOOK
@@ -294,6 +308,16 @@ def check(state):
         else:
             state.stop_reason = agent.WEAK_MATCH_ONLY
             state.answer_text = "I don't know. The only runbook matches were too weak to trust, so I will not guess."
+        return "IDK"
+
+    # The model searched again, and this result is just as weak as the last
+    # one. Stop. A stray earlier hit is not listed as a source.
+    reason, text, quality = agent.repeated_search_stop(state.last_search_quality, state.results)
+    state.last_search_quality = quality
+    if reason:
+        state.stop_reason = reason
+        state.answer_text = text
+        state.sources = []
         return "IDK"
 
     agent.remember_sources(state.sources, state.results)

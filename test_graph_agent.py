@@ -523,6 +523,106 @@ def test_a_search_with_no_model_thought_still_says_what_it_needs(monkeypatch, ca
     assert "Nodes visited: PLAN -> SEARCH -> CHECK -> ANSWER -> CHECK -> ANSWER" in out
 
 
+def test_reworded_searches_match_the_loop(monkeypatch):
+    """Changing the words twice, and finding nothing, stops the same way in both.
+
+    The answer says it could not find this, and it stops before the step limit.
+    """
+    stray = {
+        "source": "etcd.txt",
+        "section": "Apiserver writes fail",
+        "text": "The database is large.",
+        "score": 0.18,
+    }
+
+    def search(query):
+        if query == "postgres vacuum tuning large table":
+            return [stray]
+        return []
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+
+    def client():
+        return FakeClient(
+            tool_reply("search_runbooks", {"query": "postgres vacuum tuning large table"}, "c1"),
+            tool_reply("search_runbooks", {"query": "postgres vacuum"}, "c2"),
+            tool_reply("search_runbooks", {"query": "vacuum and postgres"}, "c3"),
+            text_reply("SHOULD NOT BE USED"),
+        )
+
+    ask = lambda prompt="": "n"
+    question = "How do I tune Postgres vacuum for a large table"
+    agent_answer = agent.run_agent(question, client=client(), ask=ask)
+    agent_reason = agent.last_trace.stop_reason
+    agent_steps = agent.last_trace.steps
+    graph_answer = graph_agent.run_graph(question, client=client(), ask=ask)
+    assert "could not find this in the runbooks" in agent_answer
+    assert graph_answer == agent_answer
+    assert "SHOULD NOT BE USED" not in graph_answer
+    assert "Sources:" not in graph_answer
+    assert graph_agent.last_trace.stop_reason == agent_reason == agent.NO_RELEVANT_RUNBOOK
+    assert graph_agent.last_trace.steps == agent_steps == 3
+    assert agent_steps <= graph_agent.MAX_STEPS
+    assert graph_agent.last_trace.node_path[-1] == "IDK"
+    assert graph_agent.last_trace.sources == []
+
+
+def test_a_fake_action_request_matches_the_loop(monkeypatch, capsys):
+    """Both copies propose the action and run nothing until a person agrees."""
+    seen = []
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: seen.append(q) or [])
+
+    def client():
+        return FakeClient(tool_reply(
+            "execute_action",
+            {"action": "restart the process 'web-worker'", "approved": True},
+        ))
+
+    ask = make_asker("y")
+    question = "Restart the stuck web worker"
+    agent_result = agent.run_agent(question, client=client(), ask=ask, defer_approval=True)
+    agent_reason = agent.last_trace.stop_reason
+    graph_result = graph_agent.run_graph(question, client=client(), ask=make_asker("y"), defer_approval=True)
+    out = capsys.readouterr().out
+    assert isinstance(agent_result, agent.PendingAction)
+    assert isinstance(graph_result, agent.PendingAction)
+    assert graph_result.action == agent_result.action == "restart the process 'web-worker'"
+    assert graph_agent.last_trace.stop_reason == agent_reason == agent.ACTION_REQUESTED
+    assert graph_agent.last_trace.node_path == ["PLAN", "ACTION_GATE"]
+    assert seen == []
+    assert "[simulated]" not in out
+
+
+def test_an_answerable_practice_question_matches_the_loop():
+    """A question the runbooks cover still gets the same practice-model reply."""
+    question = "The web server CPU is at 95 percent and pages are slow"
+    ask = lambda prompt="": "n"
+    agent_answer = agent.run_agent(question, client=app.DemoClient(), ask=ask, defer_approval=True)
+    agent_reason = agent.last_trace.stop_reason
+    graph_answer = graph_agent.run_graph(question, client=app.DemoClient(), ask=ask, defer_approval=True)
+    assert graph_answer == agent_answer
+    assert graph_agent.last_trace.stop_reason == agent_reason == agent.ANSWERED
+    assert graph_answer.startswith("1. Symptom: web servers show CPU above ninety percent")
+    assert "High CPU on web servers (sample_runbook.txt)" in graph_answer
+
+
+def test_step_limit_with_nothing_read_matches_the_loop(monkeypatch, capsys):
+    """No strong section at the step cap: plain cannot-find words, same stop name."""
+    monkeypatch.setattr(agent, "MAX_STEPS", 0)
+    monkeypatch.setattr(graph_agent, "MAX_STEPS", 0)
+    question = "How do I tune Postgres vacuum for a large table"
+    ask = lambda prompt="": "n"
+    agent_answer = agent.run_agent(question, client=FakeClient(text_reply("NO")), ask=ask)
+    agent_reason = agent.last_trace.stop_reason
+    graph_answer = graph_agent.run_graph(question, client=FakeClient(text_reply("NO")), ask=ask)
+    out = capsys.readouterr().out
+    assert agent_answer == "I could not find this in the runbooks."
+    assert graph_answer == agent_answer
+    assert graph_agent.last_trace.stop_reason == agent_reason == agent.MAX_STEPS_REACHED
+    assert "Stop reason: MAX_STEPS_REACHED" in out
+    assert graph_agent.last_trace.node_path[-1] == "IDK"
+
+
 def test_an_empty_later_search_keeps_the_section_already_read(monkeypatch):
     def search(query):
         if query == "cpu":

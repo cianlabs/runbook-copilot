@@ -21,6 +21,7 @@ one sentence from each matching section. A question that is itself a
 restart command proposes that restart and waits for a button.
 """
 
+import copy
 import html
 import json
 import os
@@ -74,6 +75,8 @@ def empty_view(question=""):
         "events": [],
         "pending_action": None,
         "related": [],
+        "triage": None,
+        "triage_form": None,
     }
 
 
@@ -119,6 +122,7 @@ def view_from_result(question, result):
         view["stop_reason"] = trace.stop_reason
         view["stop_plain"] = agent.STOP_REASON_PLAIN.get(trace.stop_reason, trace.stop_reason)
         view["events"] = list(trace.events)
+        view["triage"] = trace.triage
     if isinstance(result, agent.PendingAction):
         # Do not show the action as if it already happened.
         view["answer"] = "The copilot proposed an action. It is waiting for you. Nothing has run."
@@ -147,6 +151,105 @@ def ask(question, client=None):
         pending_action = result.action
     last_view = view_from_result(question, result)
     return last_view
+
+
+def _form_value(fields, name):
+    values = fields.get(name) or [""]
+    return values[0] if values else ""
+
+
+def parse_evidence_lines(text):
+    """One observation per line: id | source | observation | optional timestamp."""
+    rows = []
+    for line_number, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 3 or not parts[0] or not parts[1] or not parts[2]:
+            raise agent.AgentError(
+                "INCIDENT_INVALID",
+                f"Evidence line {line_number} needs id | source | observation.",
+            )
+        if len(parts) == 3:
+            observation = parts[2]
+            timestamp = ""
+        else:
+            observation = " | ".join(parts[2:-1]).strip()
+            timestamp = parts[-1]
+            if not observation:
+                raise agent.AgentError(
+                    "INCIDENT_INVALID",
+                    f"Evidence line {line_number} needs id | source | observation.",
+                )
+        row = {"id": parts[0], "source": parts[1], "observation": observation}
+        if timestamp:
+            row["timestamp"] = timestamp
+        rows.append(row)
+    return rows
+
+
+def evidence_lines(evidence):
+    lines = []
+    for row in evidence or []:
+        line = f"{row.get('id', '')} | {row.get('source', '')} | {row.get('observation', '')}"
+        if row.get("timestamp"):
+            line += f" | {row['timestamp']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def incident_from_form(fields):
+    """Build an incident dict from the triage form. The sample is fake data."""
+    sample = _form_value(fields, "sample").strip().lower()
+    if sample in ("1", "yes", "true", "sample"):
+        return copy.deepcopy(agent.SAMPLE_INCIDENT)
+    timeline = [line.strip() for line in _form_value(fields, "timeline").splitlines() if line.strip()]
+    return {
+        "incident_id": _form_value(fields, "incident_id").strip(),
+        "symptom": _form_value(fields, "symptom").strip(),
+        "impact": _form_value(fields, "impact").strip(),
+        "timeline": timeline,
+        "evidence": parse_evidence_lines(_form_value(fields, "evidence")),
+    }
+
+
+def triage_form_from_incident(incident):
+    return {
+        "incident_id": incident.get("incident_id", ""),
+        "symptom": incident.get("symptom", ""),
+        "impact": incident.get("impact", ""),
+        "timeline": "\n".join(incident.get("timeline") or []),
+        "evidence": evidence_lines(incident.get("evidence")),
+    }
+
+
+def triage_form_from_fields(fields):
+    return {
+        "incident_id": _form_value(fields, "incident_id"),
+        "symptom": _form_value(fields, "symptom"),
+        "impact": _form_value(fields, "impact"),
+        "timeline": _form_value(fields, "timeline"),
+        "evidence": _form_value(fields, "evidence"),
+    }
+
+
+def triage_request(fields):
+    """Run one incident triage. No model and no action. Clears any waiting approval."""
+    global pending_action, last_view
+    pending_action = None
+    try:
+        data = incident_from_form(fields)
+        answer = agent.run_incident_triage(data)
+    except (agent.AgentError, retrieve.RetrieveError) as err:
+        last_view = error_view("", err)
+        last_view["triage_form"] = triage_form_from_fields(fields)
+        return last_view
+    view = view_from_result("", answer)
+    view["triage_form"] = triage_form_from_incident(data)
+    view["pending_action"] = None
+    last_view = view
+    return view
 
 
 def describe_outcome(outcome):
@@ -344,6 +447,8 @@ button { font: 600 16px/1 "Segoe UI", sans-serif; border-radius: 999px; border: 
 .trace { list-style: none; padding: 0; margin: 0; }
 .trace li { padding: 8px 0; border-top: 1px solid #e6ebf5; }
 .trace li:first-child { border-top: 0; }
+.hypothesis { border-top: 1px solid #e6ebf5; padding-top: 10px; margin-top: 10px; }
+label.field { display: block; margin-top: 10px; }
 """
 
 
@@ -367,6 +472,86 @@ def _mode_banner(mode):
             "The key is never shown here."
         )
     return f'<div class="banner"><strong>{title}</strong><p>{body}</p></div>'
+
+
+def _triage_form(view):
+    form = view.get("triage_form") or {}
+    return (
+        "<h2>Triage an incident</h2>"
+        "<p>Type a practice incident, or use the sample. "
+        "This form does not call a model and does not use a network, even in live mode. "
+        "It only ranks hypotheses from the evidence you type. "
+        "It does not confirm a root cause, and it does not run a check or a restart. "
+        "A restart still has to be asked in the box above, and it still waits for Approve.</p>"
+        "<form method=\"post\" action=\"/triage\">"
+        "<label class=\"field\" for=\"incident_id\">Incident id</label>"
+        f"<textarea id=\"incident_id\" name=\"incident_id\" rows=\"1\">{_esc(form.get('incident_id'))}</textarea>"
+        "<label class=\"field\" for=\"symptom\">Symptom</label>"
+        f"<textarea id=\"symptom\" name=\"symptom\" rows=\"2\">{_esc(form.get('symptom'))}</textarea>"
+        "<label class=\"field\" for=\"impact\">Impact</label>"
+        f"<textarea id=\"impact\" name=\"impact\" rows=\"2\">{_esc(form.get('impact'))}</textarea>"
+        "<label class=\"field\" for=\"timeline\">Timeline, one note per line</label>"
+        f"<textarea id=\"timeline\" name=\"timeline\" rows=\"3\">{_esc(form.get('timeline'))}</textarea>"
+        "<label class=\"field\" for=\"evidence\">Evidence, one per line: id | source | observation</label>"
+        f"<textarea id=\"evidence\" name=\"evidence\" rows=\"4\">{_esc(form.get('evidence'))}</textarea>"
+        "<button class=\"ask\" type=\"submit\">Triage this incident</button>"
+        "</form>"
+        "<form method=\"post\" action=\"/triage\">"
+        "<input type=\"hidden\" name=\"sample\" value=\"1\">"
+        "<button class=\"ask\" type=\"submit\">Triage the practice sample</button>"
+        "</form>"
+    )
+
+
+def _triage_card(triage):
+    """Hypotheses with the evidence ids that matched. User text is escaped."""
+    if not triage:
+        return ""
+    incident = triage.get("incident") or {}
+    evidence = {row.get("id"): row for row in (incident.get("evidence") or []) if isinstance(row, dict)}
+    parts = [
+        "<section class=\"card\"><h2>Incident triage</h2>",
+        "<p>Confirmed root cause: not confirmed.</p>",
+        f"<p>Action mode: {_esc(triage.get('action_mode'))}. No action was run.</p>",
+        (
+            f"<p>Incident {_esc(incident.get('incident_id'))}. "
+            f"Symptom: {_esc(incident.get('symptom'))}. "
+            f"Impact: {_esc(incident.get('impact'))}.</p>"
+        ),
+    ]
+    for hypothesis in triage.get("hypotheses") or []:
+        ids = hypothesis.get("supporting_evidence_ids") or []
+        linked = ", ".join(str(item) for item in ids) if ids else "none"
+        step = hypothesis.get("next_diagnostic_step") or ""
+        if agent.step_is_write(step):
+            step_line = (
+                f"Next check was not run: {_esc(step)} "
+                "This would change something. It was not queued for approval."
+            )
+        else:
+            step_line = f"Next check, not run: {_esc(step)}"
+        parts.append("<article class=\"hypothesis\">")
+        parts.append(f"<h3>{_esc(hypothesis.get('title'))}</h3>")
+        parts.append(f"<p>Status: {_esc(hypothesis.get('status'))}.</p>")
+        parts.append(f"<p>Supporting evidence: {_esc(linked)}.</p>")
+        if ids:
+            parts.append("<ul>")
+            for evidence_id in ids:
+                row = evidence.get(evidence_id) or {}
+                parts.append(
+                    "<li><span class=\"evidence-id\">"
+                    f"{_esc(evidence_id)}</span> "
+                    f"({_esc(row.get('source'))}): {_esc(row.get('observation'))}</li>"
+                )
+            parts.append("</ul>")
+        missing = hypothesis.get("missing_evidence") or []
+        if missing:
+            parts.append("<p>Missing: " + _esc("; ".join(str(item) for item in missing)) + ".</p>")
+        parts.append(f"<p>{step_line}</p>")
+        parts.append("</article>")
+    parts.append(f"<p>{_esc(triage.get('customer_update'))}</p>")
+    parts.append("</section>")
+    return "".join(parts)
 
 
 def _question_form(question):
@@ -394,6 +579,7 @@ def render(view=None):
         "That click only runs a simulation.</p>",
         _mode_banner(view.get("mode") or current_mode()),
         _question_form(view.get("question") or ""),
+        _triage_form(view),
     ]
     error = view.get("error")
     if error:
@@ -418,9 +604,14 @@ def render(view=None):
         items = "".join(
             f"<li>{_esc(item.get('section'))} ({_esc(item.get('source'))})</li>" for item in sources
         )
-        if not items:
+        if not items and view.get("triage"):
+            items = "<li>No runbook sections. This triage used only the evidence you supplied.</li>"
+        elif not items:
             items = "<li>No sources. The copilot is not citing a section.</li>"
         parts.append(f"<section class=\"card\"><h2>Sources</h2><ul>{items}</ul></section>")
+    triage_html = _triage_card(view.get("triage"))
+    if triage_html:
+        parts.append(triage_html)
     pending = view.get("pending_action")
     if pending:
         related = view.get("related") or []
@@ -490,6 +681,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/ask":
             question = fields.get("question", [""])[0]
             self._send(render(ask(question)), 200)
+            return
+        if path == "/triage":
+            self._send(render(triage_request(fields)), 200)
             return
         if path == "/decide":
             choice = fields.get("choice", [""])[0]

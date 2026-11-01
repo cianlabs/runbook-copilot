@@ -15,6 +15,7 @@ flowchart TD
     startBox([Start]) --> PLAN
     PLAN -->|Question| SEARCH
     PLAN -->|Action request| ACTION_GATE
+    PLAN -->|Incident triage| TRIAGE
     PLAN -->|Wrote an answer| CHECK
     SEARCH --> CHECK
     CHECK -->|Nothing matched| IDK
@@ -29,6 +30,7 @@ flowchart TD
     ANSWER -->|Save the reply| answered([Stop: ANSWERED])
     IDK --> idkStop([Stop: I do not know])
     ACTION_GATE --> actionStop([Stop: ACTION_REQUESTED])
+    TRIAGE --> triaged([Stop: INCIDENT_TRIAGED])
 ```
 
 Follow one arrow at a time. A normal question takes the top path: PLAN, then SEARCH, then CHECK, then ANSWER. ANSWER writes the reply and sends it back to CHECK. If the reply cites a section that search really returned, CHECK sends it to ANSWER again, and that second visit saves the reply and stops.
@@ -48,6 +50,7 @@ Follow one arrow at a time. A normal question takes the top path: PLAN, then SEA
 - **ANSWER** writes the reply in plain words and adds the Sources list. The list only names sections search actually returned.
 - **IDK** stops. The reason is the one CHECK chose, or the step limit.
 - **ACTION_GATE** shows the action and asks a person `y` or `n`. Only `y` or `yes` runs the simulation. The model cannot approve its own action. The stop reason is `ACTION_REQUESTED`.
+- **TRIAGE** calls `triage_incident` and stops with `INCIDENT_TRIAGED`. It ranks hypotheses from the evidence in that call. It does not confirm a root cause, and it does not run a check or a restart.
 
 IDK is used for four stop reasons:
 
@@ -56,11 +59,11 @@ IDK is used for four stop reasons:
 - `UNGROUNDED_ANSWER`
 - `MAX_STEPS_REACHED`
 
-ANSWER stops with `ANSWERED`. ACTION_GATE stops with `ACTION_REQUESTED`.
+ANSWER stops with `ANSWERED`. ACTION_GATE stops with `ACTION_REQUESTED`. TRIAGE stops with `INCIDENT_TRIAGED`.
 
 ## The step limit
 
-`MAX_STEPS` is 4, the same number as in `agent.py`. The walker counts how many times it calls the model. PLAN always calls the model, so it costs one step. ANSWER costs one step only when it still needs words. Saving a reply that CHECK already approved is free. SEARCH, CHECK, IDK, and ACTION_GATE are free.
+`MAX_STEPS` is 4, the same number as in `agent.py`. The walker counts how many times it calls the model. PLAN always calls the model, so it costs one step. ANSWER costs one step only when it still needs words. Saving a reply that CHECK already approved is free. SEARCH, CHECK, IDK, ACTION_GATE, and TRIAGE are free.
 
 When the count is already 4, the walker does not call the model again. It goes to IDK and stops with `MAX_STEPS_REACHED`. A model that would search forever still stops. An answer that arrives on step 4 is kept. The cap blocks the next call. It does not throw away a real answer. If no strong section was read, the words are "I could not find this in the runbooks." The stop reason name is still `MAX_STEPS_REACHED`.
 

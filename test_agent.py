@@ -34,14 +34,14 @@ class FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=self.replies.pop(0))])
 
 
-def test_model_is_called_with_the_request_and_both_tools(monkeypatch):
+def test_model_is_called_with_the_request_and_the_tools(monkeypatch):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: RESULTS)
     client = FakeClient(tool_reply("search_runbooks", {"query": "cpu"}), text_reply("done"))
     agent.run_agent("web server CPU is high", client=client)
     first = client.calls[0]
     assert first["messages"][-1] == {"role": "user", "content": "web server CPU is high"}
     names = [t["function"]["name"] for t in first["tools"]]
-    assert names == ["search_runbooks", "execute_action"]
+    assert names == ["search_runbooks", "execute_action", "triage_incident"]
     assert first["model"] == "grok-build-0.1"
 
 

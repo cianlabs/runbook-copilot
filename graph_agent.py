@@ -14,6 +14,7 @@ flowchart TD
     startBox([Start]) --> PLAN
     PLAN -->|Question| SEARCH
     PLAN -->|Action request| ACTION_GATE
+    PLAN -->|Incident triage| TRIAGE
     PLAN -->|Wrote an answer| CHECK
     SEARCH --> CHECK
     CHECK -->|Nothing matched| IDK
@@ -28,13 +29,14 @@ flowchart TD
     ANSWER -->|Save the reply| answered([Stop: ANSWERED])
     IDK --> idkStop([Stop: I do not know])
     ACTION_GATE --> actionStop([Stop: ACTION_REQUESTED])
+    TRIAGE --> triaged([Stop: INCIDENT_TRIAGED])
 ```
 
 What each box does:
 
 - PLAN: read the request (or the sections just found) and decide. A question
-  goes to SEARCH. An action request goes to ACTION_GATE. Words with no tool
-  call go to CHECK.
+  goes to SEARCH. An action request goes to ACTION_GATE. An incident triage
+  goes to TRIAGE. Words with no tool call go to CHECK.
 - SEARCH: call the existing `search_runbooks` tool.
 - CHECK: the guardrails. Nothing matched is NO_RELEVANT_RUNBOOK. Every score
   under 0.15 is WEAK_MATCH_ONLY. An answer that cites nothing is
@@ -46,12 +48,14 @@ What each box does:
 - ANSWER: write the reply from the sections that were read, then list sources.
 - IDK: stop with the reason CHECK chose, or with MAX_STEPS_REACHED.
 - ACTION_GATE: the same human y/n question as today. Stop with ACTION_REQUESTED.
+- TRIAGE: call `triage_incident`, rank hypotheses from the supplied evidence,
+  and stop with INCIDENT_TRIAGED. Nothing is run, and no cause is confirmed.
 
 The walker counts model steps, the same idea as `MAX_STEPS` in `agent.py`.
 Four is the most. A fifth try to call the model goes to IDK with
 MAX_STEPS_REACHED. Only PLAN spends a step every time. ANSWER spends a step
-only when it still needs the model to write. SEARCH, CHECK, IDK, and
-ACTION_GATE are free.
+only when it still needs the model to write. SEARCH, CHECK, IDK, ACTION_GATE,
+and TRIAGE are free.
 
 `run_graph(request, ...)` takes the same arguments as `run_agent` and returns
 the same kind of result. The extra piece is `last_trace.node_path`: the list
@@ -63,11 +67,11 @@ a section that was really read. The second ANSWER saves the reply and stops.
 
 Stop reasons (same names as agent.py):
   ANSWERED, NO_RELEVANT_RUNBOOK, WEAK_MATCH_ONLY, UNGROUNDED_ANSWER,
-  MAX_STEPS_REACHED, ACTION_REQUESTED.
+  MAX_STEPS_REACHED, ACTION_REQUESTED, INCIDENT_TRIAGED.
 
 Named failures are the ones `agent.py` already raises: MISSING_KEY, BAD_KEY,
 MODEL_ERROR, BAD_TOOL_ARGS, EMPTY_REQUEST, UNKNOWN_TOOL,
-NOT_IMPLEMENTED_APPROVAL, and UNKNOWN_ACTION.
+NOT_IMPLEMENTED_APPROVAL, UNKNOWN_ACTION, and INCIDENT_INVALID.
 """
 
 import json
@@ -85,8 +89,8 @@ MAX_STEPS = 4
 # leaves None here instead of the previous question.
 last_trace = None
 
-# The six boxes. The walker only follows these names.
-NODE_NAMES = ("PLAN", "SEARCH", "CHECK", "ANSWER", "IDK", "ACTION_GATE")
+# The boxes. The walker only follows these names.
+NODE_NAMES = ("PLAN", "SEARCH", "CHECK", "ANSWER", "IDK", "ACTION_GATE", "TRIAGE")
 
 
 @dataclass
@@ -104,6 +108,7 @@ class GraphTrace:
     thoughts: list
     events: list
     node_path: list
+    triage: object = None
 
 
 @dataclass
@@ -148,7 +153,7 @@ def new_state(request, client, ask=input, defer_approval=False):
     )
 
 
-def save_trace(state, stop_reason, answer_text):
+def save_trace(state, stop_reason, answer_text, triage=None):
     """Remember why we stopped, and print that name. Returns the answer text."""
     global last_trace
     cited = agent.citations_for(state.sources, answer_text)
@@ -164,6 +169,7 @@ def save_trace(state, stop_reason, answer_text):
         thoughts=list(state.thoughts),
         events=events,
         node_path=list(state.node_path),
+        triage=triage,
     )
     print(f"Stop reason: {stop_reason}")
     if plain:
@@ -251,6 +257,9 @@ def choose_next(state, reply):
         return "ACTION_GATE"
     if name == "search_runbooks":
         return "SEARCH"
+    if name == "triage_incident":
+        # Read-only. The TRIAGE box runs it and stops. Nothing is approved here.
+        return "TRIAGE"
     # Not a tool we know. call_tool raises UNKNOWN_TOOL, same as the loop.
     agent.call_tool(name, **arguments)
     raise agent.AgentError("UNKNOWN_TOOL", f"no tool named '{name}'. Known tools: {', '.join(agent.TOOLS)}.")
@@ -370,6 +379,17 @@ def idk(state):
     return None
 
 
+def triage_box(state):
+    """Rank the supplied evidence and stop. No model write, no action."""
+    result = agent.call_tool("triage_incident", **agent.incident_kwargs(state.arguments))
+    text = agent.format_triage(result)
+    shown = save_trace(state, agent.INCIDENT_TRIAGED, text, triage=result)
+    print(f"Answer: {shown}")
+    print("No action was run.")
+    state.return_value = shown
+    return None
+
+
 def action_gate(state):
     """Ask a person, then stop with ACTION_REQUESTED. The model cannot approve itself."""
     save_trace(state, agent.ACTION_REQUESTED, state.action)
@@ -389,6 +409,7 @@ NODES = {
     "ANSWER": answer,
     "IDK": idk,
     "ACTION_GATE": action_gate,
+    "TRIAGE": triage_box,
 }
 
 
@@ -436,8 +457,14 @@ def run_graph(request, client=None, ask=input, defer_approval=False):
 
 
 def main(argv=None, ask=input):
-    """Ask one question from the command line. The page still uses agent.py."""
+    """Ask one question from the command line. The page still uses agent.py.
+
+    --triage and --triage-sample do the same read-only triage as agent.py.
+    They do not walk the boxes. A model tool call is what visits TRIAGE.
+    """
     args = list(sys.argv[1:] if argv is None else argv)
+    if any(a in agent.TRIAGE_FLAGS or a in agent.TRIAGE_SAMPLE_FLAGS for a in args):
+        return agent.main(args, ask=ask)
     try:
         text = " ".join(args) or ask("What's the problem? ")
         return run_graph(text, ask=ask)

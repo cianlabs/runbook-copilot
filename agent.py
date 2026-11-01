@@ -21,6 +21,7 @@ Stop reasons (printed as "Stop reason: <name>", also on last_trace.stop_reason):
   UNGROUNDED_ANSWER     - the model tried to give steps before reading any section
   MAX_STEPS_REACHED     - the loop hit MAX_STEPS before an answer and stopped
   ACTION_REQUESTED      - the model asked for execute_action; a person still has to approve it
+  INCIDENT_TRIAGED      - triage_incident ranked hypotheses from the supplied evidence; nothing ran
 
 WEAK_MATCH_ONLY and UNGROUNDED_ANSWER are the same idea as NO_RELEVANT_RUNBOOK:
 the runbooks do not support an answer, so the loop says "I don't know" and does
@@ -43,6 +44,15 @@ Named failures:
   UNKNOWN_TOOL              - the model asked for a tool that does not exist
   NOT_IMPLEMENTED_APPROVAL  - execute_action was called without human approval
   UNKNOWN_ACTION            - the approved action did not match any known action pattern
+  INCIDENT_INVALID          - the incident payload failed validation
+
+Triage without a model or a network call:
+  python agent.py --triage-sample
+  python agent.py --triage '<incident json>'
+
+triage_incident only ranks hypotheses from the evidence in that call. It does
+not confirm a root cause, and it does not run the next check. A restart,
+delete, or roll back still goes through execute_action and the approval gate.
 """
 
 import json
@@ -54,6 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import incident_triage
 import retrieve
 
 MODEL = "grok-build-0.1"
@@ -86,6 +97,7 @@ WEAK_MATCH_ONLY = "WEAK_MATCH_ONLY"  # only weak scores; do not guess
 UNGROUNDED_ANSWER = "UNGROUNDED_ANSWER"  # steps were written before any section was read
 MAX_STEPS_REACHED = "MAX_STEPS_REACHED"  # hit MAX_STEPS before an answer
 ACTION_REQUESTED = "ACTION_REQUESTED"  # execute_action; a person still has to approve
+INCIDENT_TRIAGED = "INCIDENT_TRIAGED"  # hypotheses ranked; nothing ran and nothing is confirmed
 
 # Plain sentences for the page and the terminal. The code name stays on the
 # "Stop reason:" line so logs are easy to search.
@@ -96,6 +108,10 @@ STOP_REASON_PLAIN = {
     UNGROUNDED_ANSWER: "The copilot does not know. It tried to give steps before reading a runbook section, so it will not guess.",
     MAX_STEPS_REACHED: "The copilot stopped because it used every step it is allowed. It will not keep going or guess.",
     ACTION_REQUESTED: "The copilot wants to do something. Nothing has run. It waits for you to approve or refuse.",
+    INCIDENT_TRIAGED: (
+        "The copilot ranked investigation hypotheses from the evidence supplied. "
+        "It has not confirmed a root cause, and it has not run an action."
+    ),
 }
 
 SYSTEM_PROMPT = (
@@ -123,7 +139,13 @@ SYSTEM_PROMPT = (
     "Ask for more detail, or say I don't know. "
     "If the person asks you to restart, delete, or roll back something, call execute_action right away "
     "so a human can approve it. Do not search first unless you cannot tell what to act on. "
-    "Write a restart as: restart the process '<name>' (for example 'runaway-worker')."
+    "Write a restart as: restart the process '<name>' (for example 'runaway-worker'). "
+    "If the person asks you to triage an incident and gives an incident id, a symptom, and an impact, "
+    "call triage_incident right away. Do not search the runbooks first for a triage. "
+    "Pass only the evidence they supplied. Do not invent evidence ids. "
+    "Do not say a root cause is confirmed. The tool only ranks hypotheses. "
+    "It does not run a diagnostic step or any other action. "
+    "A restart, delete, or roll back still has to go through execute_action so a person can approve it."
 )
 
 
@@ -163,6 +185,15 @@ def summarize_search(results):
         return "no results"
     top = results[0]
     return f'top="{top["section"]}" score={top["score"]:.3f} ({len(results)} results)'
+
+
+def summarize_triage(result):
+    """A short log line: hypothesis titles and the evidence ids attached to them."""
+    parts = []
+    for hypothesis in result.get("hypotheses", []):
+        ids = ",".join(hypothesis.get("supporting_evidence_ids") or []) or "none"
+        parts.append(f"{hypothesis.get('title')}[{ids}]")
+    return "simulation_only confirmed=none " + " | ".join(parts)
 
 
 # ---- Tools -----------------------------------------------------------------
@@ -234,6 +265,89 @@ def simulate_restart(name):
     )
 
 
+# Fields triage_incident will read. Anything else in the model's arguments,
+# including an "approved" flag, is ignored. The model cannot approve itself.
+INCIDENT_FIELDS = ("incident_id", "symptom", "impact", "timeline", "evidence")
+
+# A next check that uses one of these words would change something. Triage
+# never runs it and never queues it. A person still has to ask for
+# execute_action, which stops at the approval gate.
+WRITE_STEP_WORDS = frozenset({"restart", "delete", "drop", "kill", "wipe", "shutdown", "rollback"})
+
+
+def step_is_write(step):
+    """True when this suggested check is a change, not a read."""
+    text = (step or "").lower()
+    if "roll back" in text:
+        return True
+    words = set(re.findall(r"[a-z0-9]+", text))
+    return bool(words & WRITE_STEP_WORDS)
+
+
+def incident_kwargs(arguments):
+    """The incident fields from a tool call. Extra keys are dropped."""
+    if not isinstance(arguments, dict):
+        raise AgentError(
+            "BAD_TOOL_ARGS",
+            f"triage_incident needs an incident object: {arguments!r}.",
+        )
+    return {key: arguments[key] for key in INCIDENT_FIELDS if key in arguments}
+
+
+def triage_incident(**arguments):
+    """Rank hypotheses. Read-only. Never confirms a cause and never runs an action."""
+    try:
+        return incident_triage.triage(incident_kwargs(arguments))
+    except AgentError:
+        raise
+    except ValueError as exc:
+        raise AgentError("INCIDENT_INVALID", str(exc)) from exc
+
+
+def format_triage(result):
+    """Plain-language triage. Evidence ids stay attached to the hypothesis they matched."""
+    incident = result["incident"]
+    evidence = {row["id"]: row for row in incident.get("evidence") or []}
+    lines = [
+        f"Incident {incident['incident_id']} is not confirmed.",
+        "Confirmed root cause: not confirmed.",
+        f"Symptom: {incident['symptom']}",
+        f"Impact: {incident['impact']}",
+        "Hypotheses are ranked by how many supplied evidence ids match. None of them is a confirmed root cause.",
+    ]
+    for index, hypothesis in enumerate(result["hypotheses"], 1):
+        ids = hypothesis["supporting_evidence_ids"]
+        linked = ", ".join(ids) if ids else "none"
+        lines.append(
+            f"{index}. {hypothesis['title']} ({hypothesis['status']}). "
+            f"Supporting evidence: {linked}."
+        )
+        for evidence_id in ids:
+            row = evidence.get(evidence_id)
+            if row is None:
+                lines.append(f"   - {evidence_id} (the id was not in the supplied evidence)")
+                continue
+            lines.append(f"   - {evidence_id} from {row['source']}: {row['observation']}")
+        if hypothesis["missing_evidence"]:
+            lines.append("   Missing: " + "; ".join(hypothesis["missing_evidence"]))
+        step = hypothesis["next_diagnostic_step"]
+        if step_is_write(step):
+            lines.append(
+                f"   Next check was not run: {step} "
+                "This would change something. It was not run, and it was not queued for approval. "
+                "Nothing ran."
+            )
+        else:
+            lines.append(f"   Next check, not run: {step}")
+    lines.append(result["customer_update"])
+    lines.append(
+        "No action was run. Triage is simulation only. "
+        "A restart, delete, or roll back still needs a separate approval."
+    )
+    lines.append(f"Action mode: {result['action_mode']}.")
+    return "\n".join(lines)
+
+
 def execute_action(action, approved=False):
     """SIMULATED. Only runs after a human approved this exact action.
 
@@ -254,6 +368,7 @@ def execute_action(action, approved=False):
 TOOLS = {
     "search_runbooks": search_runbooks,
     "execute_action": execute_action,
+    "triage_incident": triage_incident,
 }
 
 # What the model is told about the tools.
@@ -294,6 +409,47 @@ TOOL_SPECS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "triage_incident",
+            "description": (
+                "Rank investigation hypotheses for one incident using only the evidence supplied. "
+                "Use this when the person asks to triage an incident and provides an incident id, symptom, and impact. "
+                "Call this right away. Do not search the runbooks first. "
+                "It is read-only: it does not confirm a root cause and it does not run a diagnostic step or any other action. "
+                "A restart, delete, or roll back still has to be execute_action so a person can approve it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "incident_id": {"type": "string", "description": "Caller-supplied id, such as INC-SAMPLE-1."},
+                    "symptom": {"type": "string", "description": "What is going wrong, in the caller's words."},
+                    "impact": {"type": "string", "description": "Who is affected, in the caller's words."},
+                    "timeline": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Short timeline notes. Omit if there are none.",
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "description": "Observations supplied by the caller. Do not invent ids.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "source": {"type": "string"},
+                                "observation": {"type": "string"},
+                                "timestamp": {"type": "string"},
+                            },
+                            "required": ["id", "source", "observation"],
+                        },
+                    },
+                },
+                "required": ["incident_id", "symptom", "impact"],
+            },
+        },
+    },
 ]
 
 
@@ -311,6 +467,8 @@ def call_tool(name, **arguments):
         raise
     if name == "search_runbooks":  # execute_action is logged by run_gated_action (approved or denied)
         log_tool_call(name, arguments, summarize_search(result))
+    elif name == "triage_incident":
+        log_tool_call(name, arguments, summarize_triage(result))
     return result
 
 
@@ -496,6 +654,30 @@ SAMPLE_ACTION = (
     "(runbook: High CPU on web servers)"
 )
 FORCE_FLAGS = ("--force-action", "-f")
+TRIAGE_SAMPLE_FLAGS = ("--triage-sample",)
+TRIAGE_FLAGS = ("--triage",)
+
+# A made-up incident. Nothing here is a real customer, host, or ticket.
+SAMPLE_INCIDENT = {
+    "incident_id": "INC-SAMPLE-1",
+    "symptom": "Scan reconstruction unavailable",
+    "impact": "One practice customer is blocked in the demo environment",
+    "timeline": ["10:00 acquisition complete", "10:05 reconstruction worker restarted"],
+    "evidence": [
+        {
+            "id": "log-1",
+            "source": "worker.log",
+            "observation": "worker exception during reconstruction",
+            "timestamp": "10:04",
+        },
+        {
+            "id": "metric-1",
+            "source": "queue.metrics",
+            "observation": "queue latency above the practice threshold",
+            "timestamp": "10:06",
+        },
+    ],
+}
 
 
 def run_forced_action(ask=input):
@@ -503,6 +685,27 @@ def run_forced_action(ask=input):
     arguments = {"action": SAMPLE_ACTION}
     print(f"Forced action (model skipped): execute_action({arguments})")
     return run_gated_action(SAMPLE_ACTION, ask=ask)
+
+
+def run_incident_triage(data):
+    """Rank hypotheses for one incident. No model, no network, and no action.
+
+    The same formatter the tool uses. last_trace.stop_reason is INCIDENT_TRIAGED.
+    A named AgentError leaves last_trace as None.
+    """
+    global last_trace
+    last_trace = None
+    if not isinstance(data, dict):
+        raise AgentError("INCIDENT_INVALID", "incident must be an object")
+    print("Practice triage: no model was called.")
+    events = []
+    note_event(events, 1, "Tool", "triage_incident (read-only, simulation only).")
+    result = call_tool("triage_incident", **incident_kwargs(data))
+    answer = format_triage(result)
+    shown = record_stop(INCIDENT_TRIAGED, answer, [], 1, [], events, triage=result)
+    print(f"Answer: {shown}")
+    print("No action was run.")
+    return shown
 
 
 # ---- The loop --------------------------------------------------------------
@@ -522,6 +725,7 @@ class LoopTrace:
     steps: int
     thoughts: list = field(default_factory=list)
     events: list = field(default_factory=list)  # step-by-step lines for the page
+    triage: object = None  # the incident_triage payload when stop_reason is INCIDENT_TRIAGED
 
 
 # Set when run_agent stops normally. Cleared at the start of each run, so a
@@ -789,7 +993,7 @@ def describe_results(results):
     return f"{len(results)} section(s). Top: {top.get('section')} ({score:.3f})."
 
 
-def record_stop(stop_reason, answer, sources, steps, thoughts, events=None):
+def record_stop(stop_reason, answer, sources, steps, thoughts, events=None, triage=None):
     """Remember why the loop stopped, and print that name. Returns the answer text."""
     global last_trace
     cited = citations_for(sources, answer)
@@ -799,6 +1003,7 @@ def record_stop(stop_reason, answer, sources, steps, thoughts, events=None):
     note_event(trace_events, steps, "Stopped", f"{stop_reason}. {plain}".strip())
     last_trace = LoopTrace(
         stop_reason, shown, [dict(item) for item in cited], steps, list(thoughts), trace_events,
+        triage=triage,
     )
     print(f"Stop reason: {stop_reason}")
     if plain:
@@ -828,6 +1033,9 @@ def tool_event_detail(name, arguments):
     if name == "execute_action":
         action = arguments.get("action") if isinstance(arguments, dict) else ""
         return f"execute_action: {action}"
+    if name == "triage_incident":
+        incident_id = arguments.get("incident_id") if isinstance(arguments, dict) else ""
+        return f"triage_incident for {incident_id!r}. Read-only."
     return f"{name}({arguments})"
 
 
@@ -934,6 +1142,16 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
                 return PendingAction(action)
             return run_gated_action(action, ask=ask)
 
+        # triage_incident only ranks the evidence it was given. It does not
+        # search, it does not confirm a cause, and it does not run a check.
+        if name == "triage_incident":
+            result = call_tool(name, **incident_kwargs(arguments))
+            answer = format_triage(result)
+            shown = record_stop(INCIDENT_TRIAGED, answer, [], step, thoughts, events, triage=result)
+            print(f"Answer: {shown}")
+            print("No action was run.")
+            return shown
+
         # 3) run the tool and read what came back
         results = call_tool(name, **arguments)
         if results:
@@ -973,8 +1191,31 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
 def main(argv=None, ask=input):
     args = list(sys.argv[1:] if argv is None else argv)
     force = any(a in FORCE_FLAGS for a in args)
-    args = [a for a in args if a not in FORCE_FLAGS]
+    triage_sample = any(a in TRIAGE_SAMPLE_FLAGS for a in args)
+    triage = any(a in TRIAGE_FLAGS for a in args)
+    args = [
+        a for a in args
+        if a not in FORCE_FLAGS and a not in TRIAGE_SAMPLE_FLAGS and a not in TRIAGE_FLAGS
+    ]
     try:
+        if triage_sample or triage:
+            if force:
+                raise AgentError("INCIDENT_INVALID", "Use either a triage flag or --force-action, not both.")
+            if triage_sample and triage:
+                raise AgentError("INCIDENT_INVALID", "Use either --triage or --triage-sample, not both.")
+            if triage_sample:
+                return run_incident_triage(SAMPLE_INCIDENT)
+            raw = " ".join(args).strip()
+            if not raw:
+                raise AgentError(
+                    "INCIDENT_INVALID",
+                    "Pass incident JSON after --triage, or use --triage-sample.",
+                )
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                raise AgentError("INCIDENT_INVALID", "Incident JSON could not be read.")
+            return run_incident_triage(data)
         if force:
             return run_forced_action(ask=ask)
         text = " ".join(args) or ask("What's the problem? ")

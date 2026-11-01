@@ -93,7 +93,7 @@ def mermaid_block(text):
     return text[start:end].strip()
 
 
-# ---- The picture and the six boxes ----------------------------------------
+# ---- The picture and the boxes --------------------------------------------
 
 def test_the_diagram_matches_in_the_module_the_readme_and_the_docs():
     module = mermaid_block(graph_agent.__doc__)
@@ -104,7 +104,10 @@ def test_the_diagram_matches_in_the_module_the_readme_and_the_docs():
         assert name in module
 
 
-def test_the_graph_has_exactly_the_six_boxes():
+def test_the_graph_boxes_match_the_walker():
+    assert graph_agent.NODE_NAMES == (
+        "PLAN", "SEARCH", "CHECK", "ANSWER", "IDK", "ACTION_GATE", "TRIAGE",
+    )
     assert set(graph_agent.NODES) == set(graph_agent.NODE_NAMES)
     for name in graph_agent.NODE_NAMES:
         assert callable(graph_agent.NODES[name])
@@ -122,6 +125,7 @@ def test_only_plan_and_a_fresh_answer_spend_a_step():
     assert graph_agent.spends_a_step("CHECK", state) is False
     assert graph_agent.spends_a_step("IDK", state) is False
     assert graph_agent.spends_a_step("ACTION_GATE", state) is False
+    assert graph_agent.spends_a_step("TRIAGE", state) is False
     assert graph_agent.spends_a_step("ANSWER", state) is True
     state.has_draft = True
     assert graph_agent.spends_a_step("ANSWER", state) is False

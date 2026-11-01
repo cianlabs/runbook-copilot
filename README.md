@@ -10,7 +10,7 @@ Working end to end, with a stub for the action itself. `execute_action` only pri
 - Agent loop: `agent.py` asks the model (Grok, model `grok-build-0.1`, through the xAI API) one step at a time. The model thinks, calls `search_runbooks`, reads the sections, and can search again. It then writes a short plain-language answer and cites the sections that answer relies on, or stops for a named reason. See "The agent loop" below.
 - Graph: `graph_agent.py` is the same loop drawn as boxes and arrows. `agent.py` is unchanged. The page still uses the loop. See "The same loop, drawn as boxes" below.
 - Approval gate: the agent shows the proposed action and related runbook sections, then asks `Approve this action? (y/n)`. Only `y` or `yes` lets it through. The model cannot approve its own action. The local page uses the same rule: nothing runs until you click Approve, and that click only simulates the action.
-- Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. See "The page" below.
+- Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. The same page has an incident triage form. See "The page" and "Incident triage" below.
 
 ## How it works
 
@@ -46,6 +46,7 @@ Every `run_agent` call that finishes normally prints one line, `Stop reason: NAM
 - `UNGROUNDED_ANSWER` — the model wrote an answer before reading any section (numbered steps, or anything that is not a short request for more detail). Those words are dropped. The loop says "I don't know" and cites nothing. A short "Please give me more detail." is still shown, because that is a question, not a guess.
 - `MAX_STEPS_REACHED` — the loop used every step allowed by `MAX_STEPS` in `agent.py` (4) and still had no answer. It cites the sections the citation rule kept and stops. See "The step cap" below.
 - `ACTION_REQUESTED` — the model asked for `execute_action`. The approval gate runs next, the same way as before. On the page, the action waits for a button instead.
+- `INCIDENT_TRIAGED` — `triage_incident` ranked hypotheses from the evidence in that call. The answer says the root cause is not confirmed. No check and no restart runs. This stop does not cite a runbook section. The evidence ids are listed on the hypotheses they matched.
 
 `WEAK_MATCH_ONLY` and `UNGROUNDED_ANSWER` are the same idea as `NO_RELEVANT_RUNBOOK`: do not guess. They have their own names so a log shows which guardrail fired.
 
@@ -111,6 +112,7 @@ flowchart TD
     startBox([Start]) --> PLAN
     PLAN -->|Question| SEARCH
     PLAN -->|Action request| ACTION_GATE
+    PLAN -->|Incident triage| TRIAGE
     PLAN -->|Wrote an answer| CHECK
     SEARCH --> CHECK
     CHECK -->|Nothing matched| IDK
@@ -125,6 +127,7 @@ flowchart TD
     ANSWER -->|Save the reply| answered([Stop: ANSWERED])
     IDK --> idkStop([Stop: I do not know])
     ACTION_GATE --> actionStop([Stop: ACTION_REQUESTED])
+    TRIAGE --> triaged([Stop: INCIDENT_TRIAGED])
 ```
 
 - **PLAN** decides. A question goes to SEARCH. An action request goes to ACTION_GATE. A written answer goes to CHECK.
@@ -133,12 +136,32 @@ flowchart TD
 - **ANSWER** writes the reply and lists the sources.
 - **IDK** stops with that reason, or with the step limit.
 - **ACTION_GATE** asks a person y/n, the same way as today, and stops with `ACTION_REQUESTED`.
+- **TRIAGE** runs when the model calls `triage_incident`. It ranks hypotheses from the supplied evidence and stops with `INCIDENT_TRIAGED`. It does not run an action.
 
 The walker counts model calls. Four is the most (`MAX_STEPS`), the same cap as `agent.py`. A fifth call is not made. The stop is `MAX_STEPS_REACHED`.
 
 `run_graph` takes the same inputs as `run_agent` and returns the same kind of result. The extra piece is `graph_agent.last_trace.node_path`, the list of boxes it walked. A normal question walks PLAN, SEARCH, CHECK, ANSWER, CHECK, ANSWER. The first ANSWER asks for words. CHECK makes sure they cite a real section. The second ANSWER saves the reply.
 
 A longer plain-language tour is in [docs/graph.md](docs/graph.md).
+
+## Incident triage
+
+`incident_triage.py` ranks three investigation hypotheses from the evidence you supply. It is deterministic. It does not call a model, and it does not read the runbooks. A keyword in an observation can attach that evidence id to a hypothesis. The id is kept on the hypothesis. No hypothesis is marked confirmed, and `confirmed_root_cause` stays empty.
+
+Nothing in that ranking is an action. The next check is printed as not run. If the words look like a restart, delete, or roll back, they are still not run and they are not queued. A change still has to be `execute_action`, which waits for y/yes or the Approve button. The button only simulates.
+
+From the terminal, with no API key:
+
+```
+.venv/bin/python agent.py --triage-sample
+.venv/bin/python agent.py --triage '{"incident_id": "INC-1", "symptom": "reconstruction unavailable", "impact": "one practice customer", "evidence": [{"id": "log-1", "source": "worker.log", "observation": "worker exception"}]}'
+```
+
+`--triage-sample` uses a made-up incident, `INC-SAMPLE-1`. It is not a real customer or a real system.
+
+From the page, use **Triage this incident** or **Triage the practice sample**. That form posts to `/triage`. It does not call the model, even when `XAI_API_KEY` is set. The question box is unchanged: a normal question still searches the runbooks, and a restart still waits for Approve.
+
+When the model itself calls `triage_incident`, `agent.py` and `graph_agent.py` stop the same way. The graph walks PLAN, then TRIAGE. The step cap still applies before that model call. A weak search still stops as `WEAK_MATCH_ONLY`. A runbook that is only similar is still refused.
 
 ## The page
 
@@ -158,6 +181,8 @@ The page listens only on your own computer. It shows:
 - the step-by-step trace (what it thought, which tool it called, what it read)
 
 If the copilot wants to restart something, the page shows the action and two buttons: **Approve and simulate** and **Do not run**. Asking the question does not run it. Opening the page does not run it. Only the Approve button does, and that path is the same simulation as the terminal (`settle_action` in `agent.py`). No real process is signaled.
+
+The triage form is separate. Submitting it does not approve a waiting restart, and it clears any action that was waiting so an old Approve click cannot run later.
 
 **Practice mode and live mode.** If `XAI_API_KEY` is not set, the page uses a built-in practice model (`DemoClient` in `app.py`). It searches the runbooks and quotes one sentence from each matching section. It does not call the model network, so you can try the page with no key. If the key is set, the page uses the real model through `agent.make_client`. The key is read from the terminal. It is not printed and it is not written into the page. Set the key in the same terminal, then start `app.py` again.
 
@@ -186,9 +211,10 @@ Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
 .venv/bin/python app.py
 .venv/bin/python agent.py "web server CPU is at 95 percent"
 .venv/bin/python agent.py --force-action
+.venv/bin/python agent.py --triage-sample
 ```
 
-`app.py` opens the page at http://127.0.0.1:8000. It works with no API key (practice mode). `--force-action` (or `-f`) skips the model and goes straight to the approval prompt with a sample action, so you can try the gate in the terminal without an API key.
+`app.py` opens the page at http://127.0.0.1:8000. It works with no API key (practice mode). `--force-action` (or `-f`) skips the model and goes straight to the approval prompt with a sample action, so you can try the gate in the terminal without an API key. `--triage-sample` skips the model and ranks the made-up sample incident. It does not ask for approval, because it does not run an action.
 
 ## Tests
 
@@ -196,16 +222,16 @@ Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
 .venv/bin/python -m pytest -q
 ```
 
-218 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
+237 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_triage_integration.py` triages the fake sample and a typed incident through the agent, the graph, and `/triage`, and checks that evidence ids stay on the matching hypothesis. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
 
 ## Named failures
 
 Errors have names that say what went wrong:
 
 - `retrieve.py`: NO_RUNBOOKS, EMPTY_QUERY, BAD_SETTINGS
-- `agent.py`: MISSING_KEY, BAD_KEY, MODEL_ERROR, BAD_TOOL_ARGS, EMPTY_REQUEST, UNKNOWN_TOOL, NOT_IMPLEMENTED_APPROVAL, UNKNOWN_ACTION
+- `agent.py`: MISSING_KEY, BAD_KEY, MODEL_ERROR, BAD_TOOL_ARGS, EMPTY_REQUEST, UNKNOWN_TOOL, NOT_IMPLEMENTED_APPROVAL, UNKNOWN_ACTION, INCIDENT_INVALID
 - `app.py`: STALE_APPROVAL (the Approve click did not match the action that is waiting), APPROVAL_NEEDS_A_CLICK (the page tried to ask in the terminal instead of using the button), PORT_IN_USE, PORT_NOT_A_NUMBER
-- Stop reasons in `agent.py` are not crashes. They are ANSWERED, NO_RELEVANT_RUNBOOK, WEAK_MATCH_ONLY, UNGROUNDED_ANSWER, MAX_STEPS_REACHED, and ACTION_REQUESTED. See "The agent loop". `graph_agent.py` uses those same names.
+- Stop reasons in `agent.py` are not crashes. They are ANSWERED, NO_RELEVANT_RUNBOOK, WEAK_MATCH_ONLY, UNGROUNDED_ANSWER, MAX_STEPS_REACHED, ACTION_REQUESTED, and INCIDENT_TRIAGED. See "The agent loop". `graph_agent.py` uses those same names.
 
 ## Known limits
 
@@ -217,4 +243,5 @@ Errors have names that say what went wrong:
 - When a section was actually read, the loop checks that a strong section shares a distinctive word with the question. See "Check the runbook really matches". It does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.
 - That word check can be wrong, and it is not yet proven on the real model.
 - Actions are still a simulation. The only known action is a restart.
+- Incident triage matches a few keywords in evidence observations. It does not read the symptom line, and it does not use the runbooks. Broad words such as "read" or "image" can attach an evidence id to the wrong hypothesis. A hit of one keyword clears the missing-evidence note for that hypothesis. Plurals such as "workers" do not match "worker". The three hypotheses are fixed. This has not been tried on a real model. The sample incident is fake.
 - The graph in `graph_agent.py` is a second copy of the loop, for comparison. If you change a guardrail, change it in both files, or the comparison tests will fail. The page still calls `agent.py`.

@@ -717,6 +717,12 @@ def test_the_system_prompt_asks_for_a_short_plain_language_answer():
     assert "Do not invent sections." in prompt
     assert "say I don't know" in prompt
     assert "nothing relevant" in lowered
+    # After one empty or weak search, do not keep changing the words.
+    assert "do not search again with different words" in lowered
+    assert "runbooks do not cover this" in lowered
+    # A request to do something is proposed at once, for a person to approve.
+    assert "restart, delete, or roll back" in lowered
+    assert "do not search first unless you cannot tell what to act on" in lowered
 
 
 def test_numbered_steps_without_a_read_section_are_not_shown(capsys):
@@ -860,6 +866,136 @@ def test_settle_action_runs_only_when_approved_is_exactly_true(capsys):
     result = agent.settle_action(RESTART, True)
     assert result.ok
     assert "pid 1842" in capsys.readouterr().out
+
+
+def test_reworded_searches_stop_with_a_cannot_find_answer(monkeypatch):
+    """A model that keeps changing the words should not use every step.
+
+    The first search looks like a hit. The next two find nothing. That is
+    the same miss twice in a row, so the loop says it could not find this.
+    """
+    stray = {
+        "source": "etcd.txt",
+        "section": "Apiserver writes fail",
+        "text": "The database is large.",
+        "score": 0.18,
+    }
+
+    def search(query):
+        if query == "postgres vacuum tuning large table":
+            return [stray]
+        return []
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "postgres vacuum tuning large table"}, "c1"),
+        tool_reply("search_runbooks", {"query": "postgres vacuum"}, "c2"),
+        tool_reply("search_runbooks", {"query": "vacuum and postgres"}, "c3"),
+        text_reply("SHOULD NOT BE USED"),
+    )
+    answer = agent.run_agent("How do I tune Postgres vacuum for a large table", client=client)
+    assert "could not find this in the runbooks" in answer
+    assert answer.startswith("I don't know")
+    assert "SHOULD NOT BE USED" not in answer
+    assert "Sources:" not in answer
+    assert len(client.calls) == 3
+    assert len(client.calls) <= agent.MAX_STEPS
+    assert agent.last_trace.stop_reason == agent.NO_RELEVANT_RUNBOOK
+    assert agent.last_trace.steps == 3
+    assert agent.last_trace.sources == []
+
+
+def test_two_weak_searches_in_a_row_stop_without_using_every_step(monkeypatch):
+    """Two weak results in a row are the same kind of miss. Stop there."""
+    strong = {
+        "source": "rb.txt", "section": "High CPU on web servers",
+        "text": "Restart the worker.", "score": 0.4,
+    }
+    weak = {
+        "source": "memory_leaks.txt", "section": "High swap usage",
+        "text": "See swap.", "score": 0.08,
+    }
+
+    def search(query):
+        if query == "cpu":
+            return [strong]
+        return [weak]
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "cpu"}, "c1"),
+        tool_reply("search_runbooks", {"query": "swap"}, "c2"),
+        tool_reply("search_runbooks", {"query": "memory"}, "c3"),
+        text_reply("SHOULD NOT BE USED"),
+    )
+    answer = agent.run_agent("cpu then memory", client=client)
+    assert "could not find this in the runbooks" in answer
+    assert "too weak" in answer
+    assert "SHOULD NOT BE USED" not in answer
+    assert "Sources:" not in answer
+    assert len(client.calls) == 3
+    assert agent.last_trace.stop_reason == agent.WEAK_MATCH_ONLY
+    assert agent.last_trace.sources == []
+
+
+def test_a_fake_action_request_proposes_the_action(monkeypatch, capsys):
+    """A request to do something is proposed. Nothing runs until a person agrees.
+
+    The model's own approved flag is ignored. The loop waits.
+    """
+    seen = []
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: seen.append(q) or [])
+    client = FakeClient(tool_reply(
+        "execute_action",
+        {"action": "restart the process 'web-worker'", "approved": True},
+    ))
+    result = agent.run_agent(
+        "Restart the stuck web worker", client=client, ask=make_asker("y"), defer_approval=True,
+    )
+    out = capsys.readouterr().out
+    assert isinstance(result, agent.PendingAction)
+    assert result.action == "restart the process 'web-worker'"
+    assert agent.last_trace.stop_reason == agent.ACTION_REQUESTED
+    assert seen == []
+    assert len(client.calls) == 1
+    assert "[simulated]" not in out
+    assert "Waiting for a person" in out
+
+
+def test_an_answerable_question_is_unchanged_on_the_practice_model():
+    """The built-in practice model still answers a real runbook question.
+
+    No API key is used. This is the same reply as before the search-loop change.
+    """
+    import app
+
+    question = "The web server CPU is at 95 percent and pages are slow"
+    answer = agent.run_agent(question, client=app.DemoClient(), defer_approval=True)
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert agent.last_trace.steps == 2
+    assert answer == (
+        "1. Symptom: web servers show CPU above ninety percent and response times climb.\n"
+        "\n"
+        "Sources:\n"
+        "- High CPU on web servers (sample_runbook.txt)"
+    )
+
+
+def test_step_limit_with_nothing_read_says_it_could_not_find_this(monkeypatch, capsys):
+    """Hitting the step cap with no strong section still names MAX_STEPS_REACHED.
+
+    The words say the runbooks do not cover this, instead of an empty answer.
+    """
+    monkeypatch.setattr(agent, "MAX_STEPS", 0)
+    client = FakeClient(text_reply("SHOULD NOT BE USED"))
+    answer = agent.run_agent("How do I tune Postgres vacuum for a large table", client=client)
+    out = capsys.readouterr().out
+    assert answer == "I could not find this in the runbooks."
+    assert "SHOULD NOT BE USED" not in answer
+    assert agent.last_trace.stop_reason == agent.MAX_STEPS_REACHED
+    assert agent.last_trace.sources == []
+    assert len(client.calls) == 0
+    assert "Stop reason: MAX_STEPS_REACHED" in out
 
 
 def test_an_action_after_a_search_still_stops_at_the_approval_gate(monkeypatch, capsys):

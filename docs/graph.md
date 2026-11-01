@@ -6,7 +6,7 @@ This page is for someone who is new to the code. It explains `graph_agent.py`.
 
 That kind of picture is called a state machine. You stand in one box. The box tells you where to go next. You can read one box at a time.
 
-The page still uses `agent.py`. That file stays as it is. The graph is a second copy so the two can be compared. It uses only the Python already in the project. LangGraph can come later.
+The page still uses `agent.py`. The graph is a second copy of the same rules so the two can be compared. It uses only the Python already in the project. LangGraph can come later.
 
 ## The picture
 
@@ -39,6 +39,7 @@ Follow one arrow at a time. A normal question takes the top path: PLAN, then SEA
 - **CHECK** is the guardrails, the same rules as today.
   - Nothing came back, and nothing was read earlier: stop with `NO_RELEVANT_RUNBOOK`.
   - Sections came back, but every score is under 0.15, and nothing stronger was read earlier: stop with `WEAK_MATCH_ONLY`.
+  - The next search is empty again, or weak again: stop the same way. The model was only changing the words.
   - The model wrote an answer that cites nothing: stop with `UNGROUNDED_ANSWER`.
   - A short "please tell me more" is allowed. That is a question, not a guess.
   - A strong section, or an answer that cites a real section, goes to ANSWER.
@@ -59,7 +60,7 @@ ANSWER stops with `ANSWERED`. ACTION_GATE stops with `ACTION_REQUESTED`.
 
 `MAX_STEPS` is 4, the same number as in `agent.py`. The walker counts how many times it calls the model. PLAN always calls the model, so it costs one step. ANSWER costs one step only when it still needs words. Saving a reply that CHECK already approved is free. SEARCH, CHECK, IDK, and ACTION_GATE are free.
 
-When the count is already 4, the walker does not call the model again. It goes to IDK and stops with `MAX_STEPS_REACHED`. A model that would search forever still stops. An answer that arrives on step 4 is kept. The cap blocks the next call. It does not throw away a real answer.
+When the count is already 4, the walker does not call the model again. It goes to IDK and stops with `MAX_STEPS_REACHED`. A model that would search forever still stops. An answer that arrives on step 4 is kept. The cap blocks the next call. It does not throw away a real answer. If no strong section was read, the words are "I could not find this in the runbooks." The stop reason name is still `MAX_STEPS_REACHED`.
 
 ## What you get back
 

@@ -88,7 +88,10 @@ SYSTEM_PROMPT = (
     "You are a runbook assistant. Work in steps. "
     "On each step, first think about what you still need to know and write that thought in the message. "
     "Then call search_runbooks with a short, focused query. "
-    "Read the sections that come back. If they are not enough, call search_runbooks again with a better query. "
+    "Read the sections that come back. "
+    "If a search returns nothing, or only weak matches, do not search again with different words. "
+    "Say the runbooks do not cover this. "
+    "If the sections are on the right topic but miss one detail, you may search one more time. "
     "When you have enough to answer, stop calling tools. "
     "Write a short reply in plain language: a few numbered steps the person can follow. "
     "Ground it only in the sections you read, and say it in your own words. "
@@ -97,8 +100,9 @@ SYSTEM_PROMPT = (
     "If nothing relevant was found, say I don't know. Do not guess. "
     "If you have not read a section yet, do not write numbered steps and do not invent a Sources list. "
     "Ask for more detail, or say I don't know. "
-    "If you think a step should be carried out, call execute_action; a human must approve it first. "
-    "Write the action as: restart the process '<name>' (for example 'runaway-worker')."
+    "If the person asks you to restart, delete, or roll back something, call execute_action right away "
+    "so a human can approve it. Do not search first unless you cannot tell what to act on. "
+    "Write a restart as: restart the process '<name>' (for example 'runaway-worker')."
 )
 
 
@@ -241,7 +245,8 @@ TOOL_SPECS = [
                 "Look things up in the runbooks. Use this when the user asks a question, describes a problem, "
                 "or wants information: 'what does the runbook say about high CPU', 'why is the disk full', "
                 "'how do I roll back a bad release', 'DNS name not resolved', 'deployment failed'. "
-                "It only reads and changes nothing. Returns the most relevant sections with scores."
+                "It only reads and changes nothing. Returns the most relevant sections with scores. "
+                "If the results are empty or only weak matches, do not call this again with different words."
             ),
             "parameters": {
                 "type": "object",
@@ -255,11 +260,11 @@ TOOL_SPECS = [
         "function": {
             "name": "execute_action",
             "description": (
-                "Do something. Use this when the user gives a clear command to carry out: 'restart the web server', "
-                "'kill the runaway process', 'restart the web worker', 'stop runaway-worker'. Do not search first for "
-                "a clear command. Write the action as: restart the process '<name>' (for example "
-                "'runaway-worker'; for 'the web server' use 'web-server'). A human must approve it before it runs, "
-                "and for now it is only simulated. Do NOT use it to answer questions or to look things up."
+                "Do something. Use this when the user gives a clear command to carry out: 'restart the web worker', "
+                "'delete old logs', 'roll back the release'. Call this right away. Do not search first unless the "
+                "target is unclear. Write a restart as: restart the process '<name>' (for example "
+                "'runaway-worker'). A human must approve it before it runs, and for now it is only simulated. "
+                "Do NOT use it to answer questions or to look things up."
             ),
             "parameters": {
                 "type": "object",
@@ -412,6 +417,56 @@ def max_steps_message(limit):
         "I will not guess beyond the runbook sections I already read. "
         "Ask a narrower question if you want another try."
     )
+
+
+def search_quality(results):
+    """How useful this one search was: "strong", "weak", or "none".
+
+    "strong" means some score is at least CITE_MIN_SCORE. "weak" means every
+    score is under that line. "none" means the search returned no rows.
+    """
+    if has_strong_support(results):
+        return "strong"
+    if not results:
+        return "none"
+    return "weak"
+
+
+def repeated_search_stop(previous_quality, results):
+    """Stop when the model searches again and the result is just as weak.
+
+    previous_quality is "" before any search, then "strong", "weak", or "none".
+    Two "none" results in a row, or two "weak" results in a row, means the
+    model is only changing the words. Stop with the same "I don't know" idea
+    as an empty search. A strong hit resets the count. The first weak or
+    empty search does not stop here, so a single search still behaves as before.
+
+    Returns (stop_reason, answer, quality). stop_reason is None when the
+    loop should keep going.
+    """
+    quality = search_quality(results)
+    if quality == "strong" or previous_quality != quality:
+        return None, None, quality
+    if quality == "weak":
+        answer = (
+            "I don't know. I could not find this in the runbooks. "
+            "The only matches were too weak to trust, so I will not guess."
+        )
+        return WEAK_MATCH_ONLY, answer, quality
+    answer = "I don't know. I could not find this in the runbooks, so I will not guess."
+    return NO_RELEVANT_RUNBOOK, answer, quality
+
+
+def step_limit_answer(sources, limit):
+    """Words to show when the step cap stops the loop, and which sections to cite.
+
+    A strong section keeps the older sentence, so a real runbook can still
+    be cited. If nothing strong was read, there is no answer to give. Say
+    that plainly. The caller still records the stop reason MAX_STEPS_REACHED.
+    """
+    if has_strong_support(sources):
+        return max_steps_message(limit), sources
+    return "I could not find this in the runbooks.", []
 
 
 # A made-up action for trying the approval gate without the model.
@@ -668,6 +723,9 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
     sources = []
     thoughts = []
     events = []
+    # "strong", "weak", or "none" for the search just before this one.
+    # "" means we have not searched yet.
+    previous_quality = ""
     # Built here, from the current MAX_STEPS, so a test can lower the cap.
     budget = ModelCallBudget(MAX_STEPS)
 
@@ -675,9 +733,10 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
         # Hard stop. This runs before every model call. Do not call ask_model
         # anywhere else in this loop.
         if not budget.allow():
-            shown = record_stop(
-                MAX_STEPS_REACHED, max_steps_message(MAX_STEPS), sources, budget.used, thoughts, events,
-            )
+            # No strong section means the model never reached an answer.
+            # Say so in plain words. The stop reason name stays MAX_STEPS_REACHED.
+            answer, kept = step_limit_answer(sources, MAX_STEPS)
+            shown = record_stop(MAX_STEPS_REACHED, answer, kept, budget.used, thoughts, events)
             print(f"Answer: {shown}")
             return shown
 
@@ -739,9 +798,10 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
         print_results(results)
         note_event(events, step, "Read", describe_results(results))
 
-        # Nothing strong enough to answer from: say so, and do not let the model guess.
-        # An empty later search does not come through here, because sources
-        # already holds a strong section from an earlier step.
+        # Nothing strong enough to answer from, and nothing stronger was read
+        # earlier: say so, and do not let the model guess. This is the first
+        # weak or empty search. A later empty search does not come through
+        # here, because sources already holds a strong section.
         if name == "search_runbooks" and not has_strong_support(results) and not has_strong_support(sources):
             if not results and not sources:
                 answer = "I don't know. No relevant runbook sections were found, so I will not guess."
@@ -753,7 +813,15 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
             print(f"Answer: {shown}")
             return shown
 
+        # The model searched again, and this result is just as weak as the
+        # last one. Stop. Do not keep changing the words. A stray earlier
+        # hit is not listed as a source.
         if name == "search_runbooks":
+            reason, answer, previous_quality = repeated_search_stop(previous_quality, results)
+            if reason:
+                shown = record_stop(reason, answer, [], step, thoughts, events)
+                print(f"Answer: {shown}")
+                return shown
             remember_sources(sources, results)
         append_tool_result(messages, reply, call, results)
         # 4) loop: the next step can search again, answer, or ask for an action

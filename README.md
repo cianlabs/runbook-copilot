@@ -28,7 +28,7 @@ Asking a question runs a short loop. `run_agent` in `agent.py` repeats a few ste
 1. **Think.** The model writes what it still needs. If it stays quiet, the loop says which search it is about to run, so this step is never invisible.
 2. **Search.** It calls the `search_runbooks` tool. That tool is `retrieve.search`, the same search the rest of the project uses.
 3. **Read.** The sections that come back are printed and handed to the model. Each section is remembered once, even if two chunks share a title. A weak hit is still shown here. It is not a citation yet.
-4. **Repeat or stop.** The model may search again with a better query. When it can answer, it stops calling tools and writes a short reply in plain language: a few numbered steps, in its own words, using only the sections it read. It should not paste the runbook text back under a bold title. The prompt still says do not invent sections, and say "I don't know" when nothing relevant was found. If it asks to do something, `execute_action` still stops at the approval question (`y` or `yes` only). `--force-action` still skips the model and goes straight to that question.
+4. **Repeat or stop.** The model may search one more time when the sections are on the right topic but miss a detail. It should not keep changing the words after a search that found nothing, or only weak matches. When it can answer, it stops calling tools and writes a short reply in plain language: a few numbered steps, in its own words, using only the sections it read. It should not paste the runbook text back under a bold title. The prompt still says do not invent sections, and say "I don't know" when nothing relevant was found. If the person asks to restart, delete, or roll back something, the model should call `execute_action` right away, unless it cannot tell what to act on. That still stops at the approval question (`y` or `yes` only). `--force-action` still skips the model and goes straight to that question.
 
 ![The approval gate: only y or yes runs the simulated action](images/approval-gate.png)
 
@@ -76,15 +76,25 @@ The pictures above are drawn by `make_diagrams.py` (Pillow). Run `python make_di
 
 `MAX_STEPS` in `agent.py` is 4. That is the only limit, and the loop reads it at the start of each question.
 
-Before every model call the loop asks a small counter, `ModelCallBudget`, whether another call is still allowed. When the count is already 4, the loop does not call the model. It stops with `MAX_STEPS_REACHED` and a message that says it will not guess past the sections it already read. A model that would search forever still stops at step 4. Tests cover that with a fake model that never stops asking for `search_runbooks`.
+Before every model call the loop asks a small counter, `ModelCallBudget`, whether another call is still allowed. When the count is already 4, the loop does not call the model. It stops with `MAX_STEPS_REACHED`. If it already read a strong section, the message says it will not guess past those sections. If it read nothing strong, the message says "I could not find this in the runbooks." The stop reason name is still `MAX_STEPS_REACHED`. A model that would search forever still stops at step 4. Tests cover that with a fake model that never stops asking for `search_runbooks`.
 
 An answer on the last allowed step is still `ANSWERED`. The cap stops extra calls. It does not throw away a real answer.
+
+## When search keeps changing the words
+
+On a real-model pass, 4 of 30 questions used every step and never gave an answer. The model kept searching with new words. One question was "How do I tune Postgres vacuum for a large table", which the runbooks do not cover. It searched, got a weak hit, searched again, got nothing, and then hit the step limit. "Restart the stuck web worker" is a request to do something. The model searched four times instead of proposing the action so a person can approve it. The same thing happened for "A container keeps restarting but there is no memory error in the logs" and "Delete old logs to free disk space".
+
+The instructions now say two short rules. After one search that returns nothing, or only weak matches, do not search again with different words. Say the runbooks do not cover this. If the person asks to restart, delete, or roll back something, call `execute_action` right away so a human can approve it. Do not search first unless the target is unclear.
+
+The code also stops on its own, so this does not depend on the model obeying the instructions. If a search returns nothing, or only weak matches, and the next search is the same kind of miss, the loop stops. The answer is the same "I don't know" idea as an empty search, and it says it could not find this in the runbooks. A single weak search still stops the way it did before, so the practice model is unchanged. If the loop would hit the step limit with no answer and no strong section, it says "I could not find this in the runbooks." The stop reason name stays `MAX_STEPS_REACHED`, so a count of that name still works. A person still has to approve any action. Nothing runs without that click.
+
+The practice model does the same thing as before. The new tests use fake models. They do not call a real model, and they do not use an API key. Whether the real model stops sooner has not been measured yet. That needs a real run.
 
 ## The same loop, drawn as boxes
 
 `agent.py` walks in a circle: think, search, read, then do that again or stop. `graph_agent.py` is the same work drawn as boxes and arrows. You stand in one box. The box tells you the next box. That kind of picture is called a state machine.
 
-The page still uses `agent.py`. Nothing there changed. The graph is a second copy so you can compare the two. It adds no packages. LangGraph is not used yet.
+The page still uses `agent.py`. The graph is a second copy of the same rules, so you can compare the two. It adds no packages. LangGraph is not used yet.
 
 ```mermaid
 flowchart TD
@@ -175,7 +185,7 @@ Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
 .venv/bin/python -m pytest -q
 ```
 
-204 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
+213 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
 
 ## Named failures
 

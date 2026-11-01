@@ -19,6 +19,7 @@ flowchart TD
     SEARCH --> CHECK
     CHECK -->|Nothing matched| IDK
     CHECK -->|Scores under 0.15| IDK
+    CHECK -->|Only a similar runbook| IDK
     CHECK -->|Answer cites nothing| IDK
     CHECK -->|Asking for more detail| ANSWER
     CHECK -->|Strong sections| ANSWER
@@ -41,8 +42,9 @@ Follow one arrow at a time. A normal question takes the top path: PLAN, then SEA
   - Sections came back, but every score is under 0.15, and nothing stronger was read earlier: stop with `WEAK_MATCH_ONLY`.
   - The next search is empty again, or weak again: stop the same way. The model was only changing the words.
   - The model wrote an answer that cites nothing: stop with `UNGROUNDED_ANSWER`.
+  - A strong section that is only similar to the question: stop with `NO_RELEVANT_RUNBOOK`. The same word check as the loop. A laptop question does not get a server runbook unless the runbook says laptop.
   - A short "please tell me more" is allowed. That is a question, not a guess.
-  - A strong section, or an answer that cites a real section, goes to ANSWER.
+  - A strong section that really matches, or an answer that cites a real section, goes to ANSWER.
 - **ANSWER** writes the reply in plain words and adds the Sources list. The list only names sections search actually returned.
 - **IDK** stops. The reason is the one CHECK chose, or the step limit.
 - **ACTION_GATE** shows the action and asks a person `y` or `n`. Only `y` or `yes` runs the simulation. The model cannot approve its own action. The stop reason is `ACTION_REQUESTED`.

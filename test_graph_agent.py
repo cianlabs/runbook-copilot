@@ -224,6 +224,7 @@ def test_check_sends_strong_sections_to_answer_and_remembers_them():
         "source": "rb.txt",
         "section": "High CPU on web servers",
         "score": 0.4,
+        "text": "Restart the offending worker.",
     }]
     assert state.messages[-1]["role"] == "tool"
     assert state.messages[-1]["tool_call_id"] == "abc"
@@ -806,3 +807,72 @@ def test_practice_model_stop_reason_matches_the_loop(scenario):
     }
     assert graph_agent.last_trace.node_path
     assert graph_agent.last_trace.node_path[0] == "PLAN"
+
+
+def test_the_runbook_match_check_agrees_with_the_loop(monkeypatch):
+    """A similar problem is refused in both. An exact one is answered in both.
+
+    An action request stays an action request. The graph uses the same check.
+    """
+    similar = {
+        "source": "sample_runbook.txt",
+        "section": "Disk space almost full",
+        "text": "The server disk is full. Delete old logs on the server.",
+        "score": 0.42,
+    }
+    exact = {
+        "source": "sample_runbook.txt",
+        "section": "High CPU on web servers",
+        "text": "Restart the worker that is using the CPU on the web server.",
+        "score": 0.5,
+    }
+
+    def search(query):
+        if "phone" in query:
+            return [similar]
+        return [exact]
+
+    monkeypatch.setattr(agent.retrieve, "search", search)
+    ask = lambda prompt="": "n"
+
+    def pair(question, replies):
+        agent_answer = agent.run_agent(question, client=FakeClient(*replies), ask=ask, defer_approval=True)
+        agent_reason = agent.last_trace.stop_reason
+        graph_answer = graph_agent.run_graph(
+            question, client=FakeClient(*replies), ask=ask, defer_approval=True,
+        )
+        return agent_answer, agent_reason, graph_answer
+
+    tool = tool_reply("search_runbooks", {"query": "phone storage"})
+    words = text_reply("SHOULD NOT BE USED: Delete old logs on the server.")
+    agent_answer, agent_reason, graph_answer = pair(
+        "My phone storage is full and I cannot save pictures", (tool, words),
+    )
+    assert agent_reason == agent.NO_RELEVANT_RUNBOOK
+    assert graph_answer == agent_answer
+    assert "SHOULD NOT BE USED" not in graph_answer
+    assert graph_agent.last_trace.stop_reason == agent_reason
+    assert graph_agent.last_trace.node_path[-1] == "IDK"
+    assert graph_agent.last_trace.sources == []
+
+    tool = tool_reply("search_runbooks", {"query": "web server cpu"})
+    words = text_reply("Restart the worker that is using the CPU.")
+    agent_answer, agent_reason, graph_answer = pair("The web server CPU is high", (tool, words))
+    assert agent_reason == agent.ANSWERED
+    assert graph_answer == agent_answer
+    assert graph_answer.startswith("Restart the worker that is using the CPU.")
+    assert graph_agent.last_trace.stop_reason == agent_reason
+
+    action = tool_reply("execute_action", {"action": "restart the process 'web-worker'"})
+    agent_result = agent.run_agent(
+        "Restart the worker on my laptop", client=FakeClient(action), ask=ask, defer_approval=True,
+    )
+    agent_reason = agent.last_trace.stop_reason
+    graph_result = graph_agent.run_graph(
+        "Restart the worker on my laptop", client=FakeClient(action), ask=ask, defer_approval=True,
+    )
+    assert isinstance(agent_result, agent.PendingAction)
+    assert isinstance(graph_result, agent.PendingAction)
+    assert graph_result.action == agent_result.action
+    assert graph_agent.last_trace.stop_reason == agent_reason == agent.ACTION_REQUESTED
+    assert graph_agent.last_trace.node_path == ["PLAN", "ACTION_GATE"]

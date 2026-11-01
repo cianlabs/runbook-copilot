@@ -18,6 +18,7 @@ flowchart TD
     SEARCH --> CHECK
     CHECK -->|Nothing matched| IDK
     CHECK -->|Scores under 0.15| IDK
+    CHECK -->|Only a similar runbook| IDK
     CHECK -->|Answer cites nothing| IDK
     CHECK -->|Asking for more detail| ANSWER
     CHECK -->|Strong sections| ANSWER
@@ -37,9 +38,11 @@ What each box does:
 - SEARCH: call the existing `search_runbooks` tool.
 - CHECK: the guardrails. Nothing matched is NO_RELEVANT_RUNBOOK. Every score
   under 0.15 is WEAK_MATCH_ONLY. An answer that cites nothing is
-  UNGROUNDED_ANSWER. A real match goes on to ANSWER. Two searches in a row
-  that are both empty, or both weak, also go to IDK. That stops a model
-  that only changes the words.
+  UNGROUNDED_ANSWER. A strong section that is only similar (the words do not
+  match the question, or the question names a laptop, phone, or browser and
+  the runbook does not) is also NO_RELEVANT_RUNBOOK. A real match goes on to
+  ANSWER. Two searches in a row that are both empty, or both weak, also go
+  to IDK. That stops a model that only changes the words.
 - ANSWER: write the reply from the sections that were read, then list sources.
 - IDK: stop with the reason CHECK chose, or with MAX_STEPS_REACHED.
 - ACTION_GATE: the same human y/n question as today. Stop with ACTION_REQUESTED.
@@ -277,15 +280,26 @@ def check(state):
 
     Nothing matched -> NO_RELEVANT_RUNBOOK.
     Every score under 0.15, and nothing stronger was read earlier -> WEAK_MATCH_ONLY.
+    A strong section that is only similar to the question -> NO_RELEVANT_RUNBOOK.
     An answer that cites nothing -> UNGROUNDED_ANSWER.
     A short "please give me more detail" is not a guess. It may be shown.
     Two searches in a row that are both empty, or both only weak, also stop.
     That is the same "I don't know" idea. It does not depend on the model
-    deciding to stop.
+    deciding to stop. The similar-runbook check does not depend on the model
+    either. It is the same word check as agent.runbook_match_failure.
     """
     if state.has_draft:
         if not state.sources and agent.reply_is_only_asking_for_detail(state.draft_answer):
             return "ANSWER"
+        # The model wrote an answer. Keep it only when a strong section is
+        # about this question. A similar runbook is not good enough.
+        if state.sources and not agent.reply_is_only_asking_for_detail(state.draft_answer):
+            reason = agent.runbook_match_failure(state.request, state.sources)
+            if reason:
+                state.stop_reason = reason
+                state.answer_text = agent.unmatched_runbook_answer(reason)
+                state.sources = []
+                return "IDK"
         cited = agent.citations_for(state.sources, state.draft_answer)
         if not cited:
             state.stop_reason = agent.UNGROUNDED_ANSWER

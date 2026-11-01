@@ -158,7 +158,9 @@ def test_runbook_text_is_shown_as_text_not_html(monkeypatch):
     evil = {
         "source": "x.txt",
         "section": "<script>alert(1)</script>",
-        "text": "<b>boom</b> Restart the worker.",
+        # "cpu" has to appear here. Otherwise the match check refuses the section
+        # and the page never shows this text.
+        "text": "<b>boom</b> Restart the cpu worker.",
         "score": 0.9,
     }
     monkeypatch.setattr(agent.retrieve, "search", lambda q: [evil])

@@ -26,6 +26,10 @@ WEAK_MATCH_ONLY and UNGROUNDED_ANSWER are the same idea as NO_RELEVANT_RUNBOOK:
 the runbooks do not support an answer, so the loop says "I don't know" and does
 not guess. They have their own names so a log shows which guardrail fired.
 
+A runbook that only looks similar is also NO_RELEVANT_RUNBOOK. Before the
+answer is kept, the section has to be about the same problem. See
+runbook_match_failure. That check does not call the model.
+
 Testing the approval gate without the model:
   python agent.py --force-action   (or -f) skips the model and goes straight to
   the approval prompt with a sample action.
@@ -64,6 +68,16 @@ MAX_STEPS = 4
 # and below a real match. Scores under this line are too weak to answer from
 # when they are the only thing search returned.
 CITE_MIN_SCORE = 0.15
+# A section has to score at least this high before its words can support an
+# answer. This is the same line as CITE_MIN_SCORE. A weaker hit can still be
+# printed. It is not enough to count as the same problem.
+MATCH_MIN_SCORE = CITE_MIN_SCORE
+# How many distinctive words from the question have to show up in that
+# section. One is enough: "cpu" in a CPU runbook, or "yum" in a yum runbook.
+# Zero means the runbook never actually named the problem.
+DISTINCTIVE_WORD_MIN = 1
+# Shorter than this is skipped. "a" and "to" do not identify a problem.
+MIN_WORD_LENGTH = 3
 
 # Why the loop stopped. Always printed, and always stored on last_trace.
 ANSWERED = "ANSWERED"  # enough information; the model wrote an answer
@@ -98,6 +112,13 @@ SYSTEM_PROMPT = (
     "Do not paste the runbook text back verbatim, and do not put that text under a bold title. "
     "Do not invent sections. "
     "If nothing relevant was found, say I don't know. Do not guess. "
+    "Before you answer, check that the runbook is about the same problem and the same kind of system as the question. "
+    "A server is not a laptop, a phone, or a browser. "
+    "The tool named in the question has to be the tool in the runbook. "
+    "The symptom has to be the same symptom. "
+    "If the runbook is only similar, say the runbooks do not cover this. "
+    "In one short sentence, say what the closest runbook covers. "
+    "Do not give its steps as the answer. "
     "If you have not read a section yet, do not write numbered steps and do not invent a Sources list. "
     "Ask for more detail, or say I don't know. "
     "If the person asks you to restart, delete, or roll back something, call execute_action right away "
@@ -538,12 +559,18 @@ def remember_sources(sources, results):
         except (TypeError, ValueError):
             score = 0.0
         existing = by_key.get(key)
+        # The text is kept so a later check can see whether this section is
+        # actually about the question. The Sources list does not print it.
+        extra = (result.get("text") or "").strip()
         if existing is None:
-            item = {"source": key[0], "section": section, "score": score}
+            item = {"source": key[0], "section": section, "score": score, "text": extra}
             sources.append(item)
             by_key[key] = item
-        elif score > existing["score"]:
-            existing["score"] = score
+        else:
+            if score > existing["score"]:
+                existing["score"] = score
+            if extra and extra not in existing.get("text", ""):
+                existing["text"] = (existing.get("text", "") + " " + extra).strip()
 
 
 def answer_names_section(answer, section):
@@ -574,6 +601,113 @@ def has_strong_support(results):
     are too weak to trust". A weak hit can still be printed so you can see it.
     """
     return best_score(results) >= CITE_MIN_SCORE
+
+
+# Everyday words. They show up in almost any sentence, so they do not prove
+# the runbook is about this question. "user", "set", and "large" are here
+# because many runbooks use them and they still name no specific problem.
+COMMON_WORDS = frozenset({
+    "the", "and", "for", "are", "was", "were", "you", "your", "our", "their",
+    "how", "what", "when", "where", "who", "why", "not", "can", "has", "have",
+    "had", "but", "its", "from", "with", "that", "this", "they", "them", "his",
+    "her", "she", "him", "been", "being", "will", "would", "could", "should",
+    "may", "might", "into", "over", "after", "before", "about", "than", "then",
+    "also", "just", "only", "other", "some", "any", "all", "each", "more",
+    "most", "such", "same", "very", "too", "out", "off", "down", "because",
+    "while", "during", "without", "within", "again", "still", "there", "here",
+    "please", "something", "anything", "another", "even", "though", "does",
+    "did", "doing", "get", "gets", "got", "getting", "make", "makes", "made",
+    "let", "per", "via",
+    "user", "users", "set", "sets", "large", "table", "tables",
+    "say", "says", "said", "use", "uses", "used", "using",
+    "high", "slow", "new", "old",
+})
+
+# A question that says one of these is probably about a person's own device,
+# not a server. The runbook text has to contain that same word, or we do not
+# answer from it. "wifi" is the spelling we use for "wi-fi" once the hyphen
+# is removed.
+PERSONAL_SCOPE_WORDS = frozenset({
+    "laptop", "iphone", "phone", "browser", "home", "wifi",
+})
+
+
+def words_in(text):
+    """Whole words, in lower case. "wi-fi" and "wifi" count as the same word."""
+    raw = (text or "").lower().replace("wi-fi", "wifi").replace("wi‑fi", "wifi")
+    return {
+        word for word in re.findall(r"[a-z0-9]+", raw)
+        if len(word) >= MIN_WORD_LENGTH
+    }
+
+
+def distinctive_words(text):
+    """Words that could show the runbook is about this question.
+
+    Common words are left out. What remains should be the tool, the symptom,
+    or the kind of system the person named.
+    """
+    return {word for word in words_in(text) if word not in COMMON_WORDS}
+
+
+def section_words(item):
+    """Words in one read section. The title counts, because it names the problem."""
+    title = item.get("section") or ""
+    body = item.get("text") or ""
+    return words_in(f"{title} {body}")
+
+
+def strong_sections(sources):
+    """Sections whose score is high enough to answer from."""
+    kept = []
+    for item in sources or []:
+        try:
+            score = float(item.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if score >= MATCH_MIN_SCORE:
+            kept.append(item)
+    return kept
+
+
+def unmatched_runbook_answer(reason):
+    """The same 'I don't know' sentences the other guardrails already use."""
+    if reason == WEAK_MATCH_ONLY:
+        return "I don't know. The only runbook matches were too weak to trust, so I will not guess."
+    return "I don't know. I could not find this in the runbooks, so I will not guess."
+
+
+def runbook_match_failure(question, sources):
+    """Return a stop reason when these sections should not be the answer.
+
+    None means this check does not block the answer. The match is good
+    enough, or there is no strong section and the other guardrails decide.
+    A strong section has to share at least DISTINCTIVE_WORD_MIN distinctive
+    words with the question. A personal-device word (laptop, phone, and so
+    on) blocks the answer unless that same word is in the runbook.
+
+    This is a word check. It can be wrong. It does not call a model.
+    """
+    strong = strong_sections(sources)
+    if not strong:
+        # No section scored high enough for this check. If every score is
+        # also under the citation line, the other guardrails decide.
+        # If a score clears the citation line but not MATCH_MIN_SCORE, the
+        # hit is too weak to trust.
+        if sources and best_score(sources) >= CITE_MIN_SCORE:
+            return WEAK_MATCH_ONLY
+        return None
+    runbook_words = set()
+    for item in strong:
+        runbook_words |= section_words(item)
+    # "laptop" in the question, and no "laptop" in the runbook: different system.
+    personal = words_in(question) & PERSONAL_SCOPE_WORDS
+    if personal and not personal <= runbook_words:
+        return NO_RELEVANT_RUNBOOK
+    overlap = distinctive_words(question) & runbook_words
+    if len(overlap) < DISTINCTIVE_WORD_MIN:
+        return NO_RELEVANT_RUNBOOK
+    return None
 
 
 def reply_is_only_asking_for_detail(text):
@@ -754,6 +888,15 @@ def run_agent(request, client=None, ask=input, defer_approval=False):
                 shown = record_stop(UNGROUNDED_ANSWER, answer, sources, step, thoughts, events)
                 print(f"Answer: {shown}")
                 return shown
+            # The model wrote an answer. Keep it only when a strong section is
+            # about this question. A similar runbook is not good enough.
+            if sources and not reply_is_only_asking_for_detail(text):
+                reason = runbook_match_failure(request, sources)
+                if reason:
+                    answer = unmatched_runbook_answer(reason)
+                    shown = record_stop(reason, answer, [], step, thoughts, events)
+                    print(f"Answer: {shown}")
+                    return shown
             shown = record_stop(ANSWERED, text, sources, step, thoughts, events)
             if sources:
                 print(f"Answer: {shown}")

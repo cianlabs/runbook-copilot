@@ -720,6 +720,10 @@ def test_the_system_prompt_asks_for_a_short_plain_language_answer():
     # After one empty or weak search, do not keep changing the words.
     assert "do not search again with different words" in lowered
     assert "runbooks do not cover this" in lowered
+    # A similar runbook is not an answer. Say what it covers, and do not give its steps.
+    assert "same kind of system" in lowered
+    assert "only similar" in lowered
+    assert "do not give its steps as the answer" in lowered
     # A request to do something is proposed at once, for a person to approve.
     assert "restart, delete, or roll back" in lowered
     assert "do not search first unless you cannot tell what to act on" in lowered
@@ -1012,3 +1016,118 @@ def test_an_action_after_a_search_still_stops_at_the_approval_gate(monkeypatch, 
     assert "Stop reason: ACTION_REQUESTED" in out
     assert "needs your approval" in out
     assert "[simulated]" not in out
+
+
+def test_a_similar_runbook_about_a_different_problem_is_refused(monkeypatch):
+    """A high score is not enough when the runbook is a different problem.
+
+    The question is about a phone. The runbook is about a server disk.
+    The model's steps must not be shown.
+    """
+    hit = {
+        "source": "sample_runbook.txt",
+        "section": "Disk space almost full",
+        "text": "The server disk is full. Delete old logs on the server.",
+        "score": 0.42,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [hit])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "phone storage full"}),
+        text_reply("SHOULD NOT BE USED: Delete old logs on the server."),
+    )
+    answer = agent.run_agent(
+        "My phone storage is full and I cannot save pictures", client=client,
+    )
+    assert agent.last_trace.stop_reason == agent.NO_RELEVANT_RUNBOOK
+    assert answer.startswith("I don't know")
+    assert "could not find this in the runbooks" in answer
+    assert "SHOULD NOT BE USED" not in answer
+    assert "Delete old logs" not in answer
+    assert "Sources:" not in answer
+    assert agent.last_trace.sources == []
+
+
+def test_an_exact_runbook_match_is_still_answered(monkeypatch):
+    """The same server problem, with the same words, is still answered."""
+    hit = {
+        "source": "sample_runbook.txt",
+        "section": "High CPU on web servers",
+        "text": "Restart the worker that is using the CPU on the web server.",
+        "score": 0.5,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [hit])
+    client = FakeClient(
+        tool_reply("search_runbooks", {"query": "web server cpu"}),
+        text_reply("Restart the worker that is using the CPU."),
+    )
+    answer = agent.run_agent("The web server CPU is high", client=client)
+    assert answer.startswith("Restart the worker that is using the CPU.")
+    assert agent.last_trace.stop_reason == agent.ANSWERED
+    assert agent.last_trace.sources == [
+        {"source": "sample_runbook.txt", "section": "High CPU on web servers"},
+    ]
+
+
+def test_an_action_request_is_unchanged_by_the_match_check(monkeypatch):
+    """Saying laptop in an action request does not turn it into 'I don't know'.
+
+    The action is still proposed. Nothing runs until a person agrees.
+    """
+    seen = []
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: seen.append(q) or [])
+    client = FakeClient(tool_reply(
+        "execute_action",
+        {"action": "restart the process 'web-worker'", "approved": True},
+    ))
+    result = agent.run_agent(
+        "Restart the worker on my laptop",
+        client=client,
+        ask=make_asker("y"),
+        defer_approval=True,
+    )
+    assert isinstance(result, agent.PendingAction)
+    assert result.action == "restart the process 'web-worker'"
+    assert agent.last_trace.stop_reason == agent.ACTION_REQUESTED
+    assert seen == []
+    assert len(client.calls) == 1
+
+
+def test_the_match_thresholds_are_named_constants(monkeypatch):
+    """The score line and the word count are named, and the check reads them.
+
+    Raising either one refuses a match that was fine at the normal line.
+    """
+    assert agent.MATCH_MIN_SCORE == agent.CITE_MIN_SCORE == 0.15
+    assert agent.DISTINCTIVE_WORD_MIN == 1
+    assert agent.MIN_WORD_LENGTH == 3
+    for word in ("laptop", "iphone", "phone", "browser", "home", "wifi"):
+        assert word in agent.PERSONAL_SCOPE_WORDS
+
+    hit = {
+        "source": "rb.txt",
+        "section": "High CPU on web servers",
+        "text": "Restart the worker that is using the CPU.",
+        "score": 0.4,
+    }
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [hit])
+
+    def client():
+        return FakeClient(
+            tool_reply("search_runbooks", {"query": "web server cpu"}),
+            text_reply("Restart the worker."),
+        )
+
+    # 0.4 is strong at the normal line. It is weak if the line moves up to 0.9.
+    monkeypatch.setattr(agent, "MATCH_MIN_SCORE", 0.9)
+    answer = agent.run_agent("The web server CPU is high", client=client())
+    assert agent.last_trace.stop_reason == agent.WEAK_MATCH_ONLY
+    assert "too weak" in answer
+    assert "Restart the worker." not in answer
+
+    # One shared word is enough at the normal count. Requiring many refuses it.
+    monkeypatch.setattr(agent, "MATCH_MIN_SCORE", 0.15)
+    monkeypatch.setattr(agent, "DISTINCTIVE_WORD_MIN", 8)
+    answer = agent.run_agent("The web server CPU is high", client=client())
+    assert agent.last_trace.stop_reason == agent.NO_RELEVANT_RUNBOOK
+    assert "could not find this in the runbooks" in answer
+    assert "Restart the worker." not in answer

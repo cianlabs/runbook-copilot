@@ -28,7 +28,7 @@ Asking a question runs a short loop. `run_agent` in `agent.py` repeats a few ste
 1. **Think.** The model writes what it still needs. If it stays quiet, the loop says which search it is about to run, so this step is never invisible.
 2. **Search.** It calls the `search_runbooks` tool. That tool is `retrieve.search`, the same search the rest of the project uses.
 3. **Read.** The sections that come back are printed and handed to the model. Each section is remembered once, even if two chunks share a title. A weak hit is still shown here. It is not a citation yet.
-4. **Repeat or stop.** The model may search one more time when the sections are on the right topic but miss a detail. It should not keep changing the words after a search that found nothing, or only weak matches. When it can answer, it stops calling tools and writes a short reply in plain language: a few numbered steps, in its own words, using only the sections it read. It should not paste the runbook text back under a bold title. The prompt still says do not invent sections, and say "I don't know" when nothing relevant was found. If the person asks to restart, delete, or roll back something, the model should call `execute_action` right away, unless it cannot tell what to act on. That still stops at the approval question (`y` or `yes` only). `--force-action` still skips the model and goes straight to that question.
+4. **Repeat or stop.** The model may search one more time when the sections are on the right topic but miss a detail. It should not keep changing the words after a search that found nothing, or only weak matches. When it can answer, it stops calling tools and writes a short reply in plain language: a few numbered steps, in its own words, using only the sections it read. It should not paste the runbook text back under a bold title. The prompt still says do not invent sections, and say "I don't know" when nothing relevant was found. Before that reply is kept, the loop checks that the runbook is really about the same problem. See "Check the runbook really matches" below. If the person asks to restart, delete, or roll back something, the model should call `execute_action` right away, unless it cannot tell what to act on. That still stops at the approval question (`y` or `yes` only). `--force-action` still skips the model and goes straight to that question.
 
 ![The approval gate: only y or yes runs the simulated action](images/approval-gate.png)
 
@@ -90,6 +90,16 @@ The code also stops on its own, so this does not depend on the model obeying the
 
 The practice model does the same thing as before. The new tests use fake models. They do not call a real model, and they do not use an API key. Whether the real model stops sooner has not been measured yet. That needs a real run.
 
+## Check the runbook really matches
+
+Search can hand back a runbook that shares a few words with the question but is about a different problem. A server disk runbook is not the answer for a full phone. A runbook about a server you cannot reach is not the answer for a laptop waiting on a password.
+
+The instructions tell the model to check, before it answers, that the runbook is about the same problem and the same kind of system. A server is not a laptop, a phone, or a browser. The tool named in the question has to be the tool in the runbook. The symptom has to be the same one. If the runbook is only similar, the model should say the runbooks do not cover it, say in one short sentence what the closest runbook covers, and not give that runbook's steps as the answer.
+
+The code checks this too, so it does not depend on the model obeying. Before the answer is kept, a section has to score at least `MATCH_MIN_SCORE` in `agent.py` (the same 0.15 line as a citation). At least one distinctive word from the question has to appear in that section. Everyday words such as "the" or "user" do not count. If the question says laptop, iphone, phone, browser, home, or wi-fi, that word has to be in the runbook text as well. If the check fails, the copilot says it does not know, the same way it does for `NO_RELEVANT_RUNBOOK` or `WEAK_MATCH_ONLY`. It does not list that runbook as a source.
+
+This is a simple word check. It looks for the same whole word, so "server" and "servers" count as different words. It can be wrong: it can refuse a real match, or accept a wrong runbook when one real word happens to appear. It is not yet proven on the real model. The tests use fakes and the practice model. They do not call a real model, and they do not use an API key.
+
 ## The same loop, drawn as boxes
 
 `agent.py` walks in a circle: think, search, read, then do that again or stop. `graph_agent.py` is the same work drawn as boxes and arrows. You stand in one box. The box tells you the next box. That kind of picture is called a state machine.
@@ -105,6 +115,7 @@ flowchart TD
     SEARCH --> CHECK
     CHECK -->|Nothing matched| IDK
     CHECK -->|Scores under 0.15| IDK
+    CHECK -->|Only a similar runbook| IDK
     CHECK -->|Answer cites nothing| IDK
     CHECK -->|Asking for more detail| ANSWER
     CHECK -->|Strong sections| ANSWER
@@ -118,7 +129,7 @@ flowchart TD
 
 - **PLAN** decides. A question goes to SEARCH. An action request goes to ACTION_GATE. A written answer goes to CHECK.
 - **SEARCH** calls the same `search_runbooks` tool as the loop.
-- **CHECK** applies the same guardrails. Nothing matched, every score under 0.15, or an answer that cites nothing: go to IDK. A real match goes to ANSWER.
+- **CHECK** applies the same guardrails. Nothing matched, every score under 0.15, a runbook that is only similar, or an answer that cites nothing: go to IDK. A real match goes to ANSWER.
 - **ANSWER** writes the reply and lists the sources.
 - **IDK** stops with that reason, or with the step limit.
 - **ACTION_GATE** asks a person y/n, the same way as today, and stops with `ACTION_REQUESTED`.
@@ -185,7 +196,7 @@ Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
 .venv/bin/python -m pytest -q
 ```
 
-213 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
+218 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
 
 ## Named failures
 
@@ -203,6 +214,7 @@ Errors have names that say what went wrong:
 - The page is local only (`127.0.0.1`, port 8000). It is not a hosted site.
 - Practice mode quotes one sentence from each matching section. The real model is asked to paraphrase. A practice-mode question that starts with "restart" proposes that restart and does not search first. A question that only mentions restarting, such as "what does the runbook say about restarting", still searches.
 - A short request for more detail, with no steps, is still shown when nothing has been read. Any other reply in that spot is `UNGROUNDED_ANSWER`.
-- When a section was actually read, the loop does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.
+- When a section was actually read, the loop checks that a strong section shares a distinctive word with the question. See "Check the runbook really matches". It does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.
+- That word check can be wrong, and it is not yet proven on the real model.
 - Actions are still a simulation. The only known action is a restart.
 - The graph in `graph_agent.py` is a second copy of the loop, for comparison. If you change a guardrail, change it in both files, or the comparison tests will fail. The page still calls `agent.py`.

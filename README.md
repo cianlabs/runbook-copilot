@@ -245,3 +245,7 @@ Errors have names that say what went wrong:
 - Actions are still a simulation. The only known action is a restart.
 - Incident triage matches a few keywords in evidence observations. It does not read the symptom line, and it does not use the runbooks. Broad words such as "read" or "image" can attach an evidence id to the wrong hypothesis. A hit of one keyword clears the missing-evidence note for that hypothesis. Plurals such as "workers" do not match "worker". The three hypotheses are fixed. This has not been tried on a real model. The sample incident is fake.
 - The graph in `graph_agent.py` is a second copy of the loop, for comparison. If you change a guardrail, change it in both files, or the comparison tests will fail. The page still calls `agent.py`.
+
+## License
+
+Original project code and documentation are licensed under the [MIT License](LICENSE). This license does not relicense third-party incident reports, datasets, or other third-party material. Those materials remain subject to their original rights and terms; existing source links and attributions are retained.

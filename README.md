@@ -1,3 +1,17 @@
+---
+title: Runbook Copilot
+emoji: 📘
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: 5.50.0
+app_file: space/app.py
+pinned: false
+license: mit
+short_description: Ask runbooks with citations and an approval gate
+python_version: "3.12"
+---
+
 # runbook-copilot
 
 **Goal:** an agent that searches a runbook knowledge base (RAG) and takes actions via tool calls, with a human approval step before anything runs.
@@ -200,10 +214,47 @@ The tests in `test_agent.py` and `test_app.py` drive the loop and the page with 
 
 ```
 python3 -m venv .venv
-.venv/bin/pip install openai scikit-learn pytest
+.venv/bin/pip install -r requirements.txt pytest
 ```
 
-Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
+`requirements.txt` is what a Hugging Face Space installs (`openai`, `scikit-learn`). Gradio is already on the Space. For a local preview of the Space UI, also run `.venv/bin/pip install gradio`.
+
+Set `XAI_API_KEY` in your Terminal tab first when you want the live model. Never put the key in a file. The page and the Space both run in practice mode when the key is missing.
+
+## Try it on Hugging Face
+
+`space/app.py` is a Gradio page a stranger can open. It uses the same copilot as `app.py`: citations or an honest "I don't know", and the Approve button before any simulated restart. Each visitor has their own waiting action. The runbooks in the repo are the public samples already in `runbooks/`.
+
+The YAML block at the top of this file is the Space config (`sdk: gradio`, `app_file: space/app.py`). Hugging Face reads it when this repository is the Space.
+
+**Practice path (no key).** Leave `XAI_API_KEY` unset. The Space uses `DemoClient` in `app.py`. Tests in `test_space.py` use that path. They do not call a model.
+
+**Live path.** In the Space, open **Settings → Secrets** (or Variables and secrets) and add a secret named `XAI_API_KEY`. Restart the Space. The key stays in the secret store. It is not written into this README, the page, or git. Locally, export the same variable in the terminal and start again. Do not paste the key into chat or into a file in the repo.
+
+**What you still do, once, with your Hugging Face login.** This repo cannot create the Space for you.
+
+1. Open https://huggingface.co/new-space (you must be logged in).
+2. Choose **Gradio** and a Space name, for example `runbook-copilot`. Hardware can stay on the free CPU basic tier. This demo does not need a GPU.
+3. Connect this GitHub repository (Space settings → link a GitHub repo) or, from a machine where `hf auth login` has already been run:
+
+```
+hf repos create YOUR_USER/runbook-copilot --type space --space-sdk gradio --public --exist-ok
+hf upload YOUR_USER/runbook-copilot . --repo-type space --exclude ".venv/*" --exclude ".git/*" --exclude "**/__pycache__/*"
+```
+
+4. Optional live model: **Settings → Secrets → New secret**, name `XAI_API_KEY`, value is your xAI key. Then **Factory reboot**.
+5. When the Space is running, the public URL is `https://YOUR_USER-runbook-copilot.hf.space`.
+
+Without step 4 the Space still answers in practice mode.
+
+**Run the same UI locally**
+
+```
+.venv/bin/pip install gradio
+.venv/bin/python space/app.py
+```
+
+Gradio prints a local URL, usually http://127.0.0.1:7860. No key means practice mode.
 
 ## Usage
 
@@ -222,7 +273,7 @@ Set `XAI_API_KEY` in your Terminal tab first. Never put the key in a file.
 .venv/bin/python -m pytest -q
 ```
 
-237 tests pass. They use fake data and a fake model, so they need no key and no network. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_triage_integration.py` triages the fake sample and a typed incident through the agent, the graph, and `/triage`, and checks that evidence ids stay on the matching hypothesis. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
+The tests use fake data and a fake model, so they need no key and no network. `test_space.py` checks the Gradio handlers (citations, "I don't know", and the approval session) without starting a server. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_triage_integration.py` triages the fake sample and a typed incident through the agent, the graph, and `/triage`, and checks that evidence ids stay on the matching hypothesis. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
 
 ## Named failures
 
@@ -237,7 +288,7 @@ Errors have names that say what went wrong:
 
 - Search folds simple word endings, so "deployment" matches "deploy". A later upgrade could switch this to embeddings.
 - The runbooks are a small sample.
-- The page is local only (`127.0.0.1`, port 8000). It is not a hosted site.
+- The local page listens only on your computer (`127.0.0.1`, port 8000). A public demo is the Hugging Face Space in [Try it on Hugging Face](#try-it-on-hugging-face).
 - Practice mode quotes one sentence from each matching section. The real model is asked to paraphrase. A practice-mode question that starts with "restart" proposes that restart and does not search first. A question that only mentions restarting, such as "what does the runbook say about restarting", still searches.
 - A short request for more detail, with no steps, is still shown when nothing has been read. Any other reply in that spot is `UNGROUNDED_ANSWER`.
 - When a section was actually read, the loop checks that a strong section shares a distinctive word with the question. See "Check the runbook really matches". It does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.

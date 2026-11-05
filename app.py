@@ -131,10 +131,21 @@ def view_from_result(question, result):
     return view
 
 
-def ask(question, client=None):
+def _session(session):
+    """The local page shares one pair of globals. A caller can pass its own.
+
+    A Space visitor passes a private object so two people do not share one
+    waiting action. Omitting session keeps the original page behavior.
+    """
+    if session is None:
+        return sys.modules[__name__]
+    return session
+
+
+def ask(question, client=None, session=None):
     """Run one question. An action is held for a button; it is not run here."""
-    global pending_action, last_view
-    pending_action = None
+    sess = _session(session)
+    sess.pending_action = None
     try:
         if client is None:
             client = client_for_page()
@@ -145,12 +156,12 @@ def ask(question, client=None):
             defer_approval=True,
         )
     except (agent.AgentError, retrieve.RetrieveError) as err:
-        last_view = error_view(question, err)
-        return last_view
+        sess.last_view = error_view(question, err)
+        return sess.last_view
     if isinstance(result, agent.PendingAction):
-        pending_action = result.action
-    last_view = view_from_result(question, result)
-    return last_view
+        sess.pending_action = result.action
+    sess.last_view = view_from_result(question, result)
+    return sess.last_view
 
 
 def _form_value(fields, name):
@@ -234,21 +245,21 @@ def triage_form_from_fields(fields):
     }
 
 
-def triage_request(fields):
+def triage_request(fields, session=None):
     """Run one incident triage. No model and no action. Clears any waiting approval."""
-    global pending_action, last_view
-    pending_action = None
+    sess = _session(session)
+    sess.pending_action = None
     try:
         data = incident_from_form(fields)
         answer = agent.run_incident_triage(data)
     except (agent.AgentError, retrieve.RetrieveError) as err:
-        last_view = error_view("", err)
-        last_view["triage_form"] = triage_form_from_fields(fields)
-        return last_view
+        sess.last_view = error_view("", err)
+        sess.last_view["triage_form"] = triage_form_from_fields(fields)
+        return sess.last_view
     view = view_from_result("", answer)
     view["triage_form"] = triage_form_from_incident(data)
     view["pending_action"] = None
-    last_view = view
+    sess.last_view = view
     return view
 
 
@@ -271,11 +282,11 @@ def describe_outcome(outcome):
     return "Nothing was run."
 
 
-def decide(choice, action):
+def decide(choice, action, session=None):
     """The Approve / Do not run buttons. Only the waiting action can be approved."""
-    global pending_action, last_view
-    expected = pending_action
-    view = dict(last_view or empty_view())
+    sess = _session(session)
+    expected = sess.pending_action
+    view = dict(sess.last_view or empty_view())
     if not expected or action != expected:
         # Leave the real waiting action in place. A wrong click must not
         # approve something else, and it must not throw away the real one.
@@ -283,9 +294,9 @@ def decide(choice, action):
             "STALE_APPROVAL",
             "That is not the action waiting for approval. Use the button on the latest result.",
         ))
-        last_view = view
+        sess.last_view = view
         return view
-    pending_action = None
+    sess.pending_action = None
     view["pending_action"] = None
     view["related"] = []
     approved = str(choice or "").strip().lower() in ("y", "yes")
@@ -293,7 +304,7 @@ def decide(choice, action):
         outcome = agent.settle_action(expected, approved)
     except agent.AgentError as err:
         view["error"] = public_error(err)
-        last_view = view
+        sess.last_view = view
         return view
     view["decision"] = describe_outcome(outcome)
     view["decision_ok"] = isinstance(outcome, agent.ActionResult) and outcome.ok
@@ -309,7 +320,7 @@ def decide(choice, action):
     else:
         view["answer"] = "The simulation did not do the action. Nothing on a real machine was changed."
         view["stop_plain"] = view["answer"]
-    last_view = view
+    sess.last_view = view
     return view
 
 

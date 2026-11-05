@@ -1,0 +1,5 @@
+# Space and local agent dependencies.
+# Gradio is preinstalled on a Hugging Face Space. Do not pin it here.
+# Install it yourself for a local preview: pip install gradio
+openai
+scikit-learn

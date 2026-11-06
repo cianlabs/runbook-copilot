@@ -24,7 +24,7 @@ Working end to end, with a stub for the action itself. `execute_action` only pri
 - Agent loop: `agent.py` asks the model (Grok, model `grok-build-0.1`, through the xAI API) one step at a time. The model thinks, calls `search_runbooks`, reads the sections, and can search again. It then writes a short plain-language answer and cites the sections that answer relies on, or stops for a named reason. See "The agent loop" below.
 - Graph: `graph_agent.py` is the same loop drawn as boxes and arrows. `agent.py` is unchanged. The page still uses the loop. See "The same loop, drawn as boxes" below.
 - Approval gate: the agent shows the proposed action and related runbook sections, then asks `Approve this action? (y/n)`. Only `y` or `yes` lets it through. The model cannot approve its own action. The local page uses the same rule: nothing runs until you click Approve, and that click only simulates the action.
-- Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. The same page has an incident triage form. See "The page" and "Incident triage" below.
+- Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. The same page has an incident triage form. The public demo is `streamlit_app.py` on Streamlit Community Cloud. See "The page", "Try it on Streamlit Community Cloud", and "Incident triage" below.
 
 ## How it works
 
@@ -179,7 +179,7 @@ When the model itself calls `triage_incident`, `agent.py` and `graph_agent.py` s
 
 ## The page
 
-The page is `app.py`. It uses Python's built-in web server. Gradio, Streamlit, or Flask would mean another install for one form and two buttons. This page adds no packages, starts with one command, and the HTML sits in the same file so it is easy to read.
+The local page is `app.py`. It uses Python's built-in web server, adds no packages, and starts with one command. The HTML sits in the same file so it is easy to read. The public page is `streamlit_app.py` (see below). `space/app.py` is an optional Gradio page.
 
 ```
 .venv/bin/python app.py
@@ -217,44 +217,55 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt pytest
 ```
 
-`requirements.txt` is what a Hugging Face Space installs (`openai`, `scikit-learn`). Gradio is already on the Space. For a local preview of the Space UI, also run `.venv/bin/pip install gradio`.
+`requirements.txt` is what Streamlit Community Cloud installs (`openai`, `scikit-learn`, `streamlit`). The same file is enough for a local agent. Gradio is not listed: a Hugging Face Gradio Space already has it, and creating that Space needs a paid Hugging Face plan on the account that owns it. For a local preview of the Gradio UI only, also run `.venv/bin/pip install gradio`.
 
-Set `XAI_API_KEY` in your Terminal tab first when you want the live model. Never put the key in a file. The page and the Space both run in practice mode when the key is missing.
+Set `XAI_API_KEY` in your Terminal tab first when you want the live model. Never put the key in a file that you commit. The local page, the Streamlit app, and the optional Space all run in practice mode when the key is missing.
 
-## Try it on Hugging Face
+## Try it on Streamlit Community Cloud
 
-`space/app.py` is a Gradio page a stranger can open. It uses the same copilot as `app.py`: citations or an honest "I don't know", and the Approve button before any simulated restart. Each visitor has their own waiting action. The runbooks in the repo are the public samples already in `runbooks/`.
+`streamlit_app.py` is the page a stranger can open. It uses the same copilot as `app.py`: citations or an honest "I don't know", and **Approve and simulate** before any simulated restart. Each browser session has its own waiting action. The runbooks are the public samples already in `runbooks/`. No customer data is in this repo.
 
-The YAML block at the top of this file is the Space config (`sdk: gradio`, `app_file: space/app.py`). Hugging Face reads it when this repository is the Space.
+**Practice path (no key).** Leave secrets empty. The app uses `DemoClient` in `app.py`. `test_streamlit.py` uses that path. It does not call a model and it does not start a Streamlit server.
 
-**Practice path (no key).** Leave `XAI_API_KEY` unset. The Space uses `DemoClient` in `app.py`. Tests in `test_space.py` use that path. They do not call a model.
+**Live path.** On the deployed app, open the overflow menu, then **Settings → Secrets**, and paste a single line. Reboot the app. The app copies that name into the process environment for `agent.make_client`. The value is not printed and is not written into the page. Do not commit `.streamlit/secrets.toml` (it is gitignored). Locally, export `XAI_API_KEY` in the terminal, or put the same line in an untracked `.streamlit/secrets.toml`, then start again.
 
-**Live path.** In the Space, open **Settings → Secrets** (or Variables and secrets) and add a secret named `XAI_API_KEY`. Restart the Space. The key stays in the secret store. It is not written into this README, the page, or git. Locally, export the same variable in the terminal and start again. Do not paste the key into chat or into a file in the repo.
-
-**What you still do, once, with your Hugging Face login.** This repo cannot create the Space for you.
-
-1. Open https://huggingface.co/new-space (you must be logged in).
-2. Choose **Gradio** and a Space name, for example `runbook-copilot`. Hardware can stay on the free CPU basic tier. This demo does not need a GPU.
-3. Connect this GitHub repository (Space settings → link a GitHub repo) or, from a machine where `hf auth login` has already been run:
-
-```
-hf repos create YOUR_USER/runbook-copilot --type space --space-sdk gradio --public --exist-ok
-hf upload YOUR_USER/runbook-copilot . --repo-type space --exclude ".venv/*" --exclude ".git/*" --exclude "**/__pycache__/*"
+```toml
+XAI_API_KEY = "paste-the-xai-key-here"
 ```
 
-4. Optional live model: **Settings → Secrets → New secret**, name `XAI_API_KEY`, value is your xAI key. Then **Factory reboot**.
-5. When the Space is running, the public URL is `https://YOUR_USER-runbook-copilot.hf.space`.
+**Run it on your machine**
 
-Without step 4 the Space still answers in practice mode.
+```
+.venv/bin/streamlit run streamlit_app.py
+```
 
-**Run the same UI locally**
+Streamlit prints a local URL, usually http://127.0.0.1:8501. No key means practice mode.
+
+**What you still click, once, on share.streamlit.io.** This repo cannot create the Cloud app for you. Do this after the Streamlit pull request is on `main` (or point the branch at the pull request branch if you want to try it first).
+
+1. Open https://share.streamlit.io/ and sign in with GitHub as the account that can read `cianlabs/runbook-copilot`.
+2. Click **Create app**.
+3. Repository: `cianlabs/runbook-copilot`.
+4. Branch: `main`.
+5. Main file path: `streamlit_app.py`.
+6. Leave the app public. This demo does not need extra Python packages beyond `requirements.txt`.
+7. Click **Deploy**. Wait until the app status is running. The public URL is the one Streamlit shows at the top of that app (it ends in `.streamlit.app`).
+8. Optional live model: on the running app, open the menu (⋮) → **Settings** → **Secrets**, paste the `XAI_API_KEY` line from above, save, then menu → **Reboot app**. Skip this step to stay in practice mode.
+
+Share that `.streamlit.app` URL. A visitor can ask a question with no account and no API key.
+
+## Optional: Hugging Face Gradio Space
+
+`space/app.py` is the same demo as a Gradio app. The YAML block at the top of this file is the Space config (`sdk: gradio`, `app_file: space/app.py`). Hugging Face reads it when this repository is the Space.
+
+That Space is optional. A free Hugging Face account cannot create a Gradio Space when the account is required to be on a paid (PRO) plan. Use Streamlit Community Cloud above for the public demo. If you already have PRO, the Space still works: **Settings → Secrets**, name `XAI_API_KEY`, then restart. Without that secret the Space stays in practice mode. `test_space.py` covers the handlers without starting Gradio.
 
 ```
 .venv/bin/pip install gradio
 .venv/bin/python space/app.py
 ```
 
-Gradio prints a local URL, usually http://127.0.0.1:7860. No key means practice mode.
+Gradio prints a local URL, usually http://127.0.0.1:7860.
 
 ## Usage
 
@@ -273,7 +284,7 @@ Gradio prints a local URL, usually http://127.0.0.1:7860. No key means practice 
 .venv/bin/python -m pytest -q
 ```
 
-The tests use fake data and a fake model, so they need no key and no network. `test_space.py` checks the Gradio handlers (citations, "I don't know", and the approval session) without starting a server. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_triage_integration.py` triages the fake sample and a typed incident through the agent, the graph, and `/triage`, and checks that evidence ids stay on the matching hypothesis. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
+The tests use fake data and a fake model, so they need no key and no network. `test_streamlit.py` checks the Streamlit handlers (citations, "I don't know", the approval session, and that a secret is not shown) without starting a server and without installing Streamlit. `test_space.py` checks the optional Gradio handlers the same way. `test_app.py` also starts the page on a random local port and clicks through ask, refuse, and approve. `test_triage_integration.py` triages the fake sample and a typed incident through the agent, the graph, and `/triage`, and checks that evidence ids stay on the matching hypothesis. `test_graph_agent.py` walks every box in the graph and checks that the graph and the loop stop for the same reason. Run the scenarios with `.venv/bin/python evals.py` (add `--real` only when you want the live model).
 
 ## Named failures
 
@@ -288,7 +299,7 @@ Errors have names that say what went wrong:
 
 - Search folds simple word endings, so "deployment" matches "deploy". A later upgrade could switch this to embeddings.
 - The runbooks are a small sample.
-- The local page listens only on your computer (`127.0.0.1`, port 8000). A public demo is the Hugging Face Space in [Try it on Hugging Face](#try-it-on-hugging-face).
+- The local page listens only on your computer (`127.0.0.1`, port 8000). The public demo is [Try it on Streamlit Community Cloud](#try-it-on-streamlit-community-cloud). The Gradio Space is optional and may require a paid Hugging Face plan.
 - Practice mode quotes one sentence from each matching section. The real model is asked to paraphrase. A practice-mode question that starts with "restart" proposes that restart and does not search first. A question that only mentions restarting, such as "what does the runbook say about restarting", still searches.
 - A short request for more detail, with no steps, is still shown when nothing has been read. Any other reply in that spot is `UNGROUNDED_ANSWER`.
 - When a section was actually read, the loop checks that a strong section shares a distinctive word with the question. See "Check the runbook really matches". It does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.

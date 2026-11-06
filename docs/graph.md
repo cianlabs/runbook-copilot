@@ -10,6 +10,10 @@ The page still uses `agent.py`. The graph is a second copy of the same rules so 
 
 ## The picture
 
+![State machine: Start, PLAN, SEARCH, CHECK, ANSWER, IDK, ACTION_GATE, TRIAGE](../images/graph-loop.png)
+
+The same picture is written below as Mermaid so it can be checked against `graph_agent.py` and the README.
+
 ```mermaid
 flowchart TD
     startBox([Start]) --> PLAN

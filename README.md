@@ -28,6 +28,8 @@ Working end to end, with a stub for the action itself. `execute_action` only pri
 
 ## How it works
 
+![How runbook-copilot is wired: you, the model, search, and the approval gate](images/architecture.png)
+
 1. Loop: think, search the runbooks, read the sections, and repeat until a stop reason. Details are in "The agent loop" below.
 2. Propose: the model may ask for `execute_action`.
 3. Approve: a human types y or n.
@@ -85,7 +87,7 @@ Sources:
 - High CPU on web servers (sample_runbook.txt)
 ```
 
-The pictures above are drawn by `make_diagrams.py` (Pillow). Run `python make_diagrams.py` to regenerate the PNGs in `images/`. No secrets are drawn into them.
+The pictures above, and the graph picture below, are drawn by `make_diagrams.py` (Pillow). Run `python make_diagrams.py` to regenerate them. No secrets are drawn into them. [M1 recap](images/m1-recap.png) and [M2 recap](images/m2-recap.png) are the style references for those pictures. The script does not draw them.
 
 ## The step cap
 
@@ -120,6 +122,10 @@ This is a simple word check. It looks for the same whole word, so "server" and "
 `agent.py` walks in a circle: think, search, read, then do that again or stop. `graph_agent.py` is the same work drawn as boxes and arrows. You stand in one box. The box tells you the next box. That kind of picture is called a state machine.
 
 The page still uses `agent.py`. The graph is a second copy of the same rules, so you can compare the two. It adds no packages. LangGraph is not used yet.
+
+![State machine: Start, PLAN, SEARCH, CHECK, ANSWER, IDK, ACTION_GATE, TRIAGE](images/graph-loop.png)
+
+The same picture is written below as Mermaid so it can be checked against `graph_agent.py` and [docs/graph.md](docs/graph.md).
 
 ```mermaid
 flowchart TD

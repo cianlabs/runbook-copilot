@@ -16,6 +16,24 @@ python_version: "3.12"
 
 **Goal:** an agent that searches a runbook knowledge base (RAG) and takes actions via tool calls, with a human approval step before anything runs.
 
+## Public demo (60 seconds)
+
+Practice mode is the default. No account and no API key. The banner on the page says **Practice mode**.
+
+Open the live app: https://runbook-copilot-c3shmapppprk7ktdashvyei.streamlit.app
+
+The Hugging Face page https://huggingface.co/spaces/itskeeeyin/runbook-copilot is a landing page that points at that app. It does not run the copilot.
+
+1. **Ask.** Open “Try a sample question”, pick `web server CPU is at 95 percent`, and click **Ask the copilot**.
+2. **Sources.** The page lists the runbook section it used. For that question the source is High CPU on web servers (`sample_runbook.txt`). A question the runbooks do not cover says it does not know and cites nothing.
+3. **Approve or abstain.** Pick `restart the runaway worker` and ask again. The page shows the action and waits. **Approve and simulate** only pretends to restart a process. **Do not run** does nothing.
+
+![Practice mode: the CPU question, the answer, and the cited source](docs/demo/practice-ask-sources.png)
+
+![The restart waits on Approve and simulate or Do not run](docs/demo/practice-approve.png)
+
+The same path on video, about 40 seconds: [ask, then sources, then approve](docs/demo/practice-ask-sources-approve.mp4).
+
 ## Status
 
 Working end to end, with a stub for the action itself. `execute_action` only prints what it would do and never changes a real system.

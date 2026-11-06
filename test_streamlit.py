@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 import agent
 import app
 import streamlit_app
@@ -81,6 +83,38 @@ def test_two_sessions_do_not_share_a_waiting_action(monkeypatch):
     assert app.pending_action is None
 
 
+def test_approve_fills_triage_widgets_and_writes_lessons(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [])
+    store = _store()
+    session = streamlit_app.ensure_session(store)
+    streamlit_app.on_ask("restart the runaway worker", session)
+    fields = streamlit_app.approve_and_fill(store, session)
+    assert "Simulated only" in fields[7]
+    assert "No real process was touched" in fields[7]
+    assert "not confirmed" in fields[8]
+    assert "metric-cpu" in fields[8]
+    assert session.pending_action is None
+    assert fields[6] == ""
+    for key in (
+        "triage_incident_id",
+        "triage_symptom",
+        "triage_impact",
+        "triage_timeline",
+        "triage_evidence",
+    ):
+        assert str(store.get(key) or "").strip(), key
+    assert store["triage_incident_id"] == "INC-PRACTICE-CPU"
+    assert "95" in store["triage_symptom"]
+    assert "metric-cpu" in store["triage_evidence"]
+    assert "sim-restart" in store["triage_evidence"]
+    lessons = session.last_view["lessons"]
+    assert "Practice lessons learned" in lessons
+    assert "engineering" in lessons.lower()
+    assert "not confirmed" in lessons.lower()
+    assert "fake restart done" not in lessons.lower()
+    assert capsys.readouterr().out.count("Sending SIGTERM") == 1
+
+
 def test_practice_sample_triage_does_not_run_an_action():
     session = streamlit_app.ensure_session(_store())
     session.pending_action = "restart the process 'runaway-worker'"
@@ -120,6 +154,35 @@ def test_an_existing_environment_key_is_not_replaced(monkeypatch):
     streamlit_app.apply_streamlit_secret({"XAI_API_KEY": "sk-other-secret"})
     assert os.environ["XAI_API_KEY"] == "already-set"
     assert "sk-other-secret" not in streamlit_app.mode_banner()
+
+
+def test_the_visible_form_fills_in_after_approve(monkeypatch):
+    """The Streamlit widgets themselves, not only the handler return value."""
+    pytest.importorskip("streamlit.testing.v1")
+    from streamlit.testing.v1 import AppTest
+
+    # A secret test may have copied a key into the environment. Stay in practice mode.
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    app = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    app.run()
+    app.selectbox[0].select("restart the runaway worker").run()
+    app.button[0].click().run()
+    assert not app.exception
+    approve = next(button for button in app.button if button.label == "Approve and simulate")
+    approve.click().run()
+    assert not app.exception
+    values = {field.label: field.value or "" for field in list(app.text_input) + list(app.text_area)}
+    assert values["Incident id"] == "INC-PRACTICE-CPU"
+    assert "95 percent" in values["Symptom"]
+    assert values["Impact"].strip()
+    assert "runaway-worker" in values["Timeline, one note per line"]
+    assert "metric-cpu" in values["Evidence, one per line: id | source | observation"]
+    assert "sim-restart" in values["Evidence, one per line: id | source | observation"]
+    shown = "\n".join(block.value or "" for block in app.text)
+    assert "Practice lessons learned" in shown
+    assert "not confirmed" in shown.lower()
+    assert "fake restart done" not in shown.lower()
+    assert all(button.label != "Approve and simulate" for button in app.button)
 
 
 def test_main_refuses_to_start_without_streamlit(monkeypatch):

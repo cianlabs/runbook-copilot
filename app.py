@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import agent
+import incident_triage
 import retrieve
 
 HOST = "127.0.0.1"
@@ -77,6 +78,7 @@ def empty_view(question=""):
         "related": [],
         "triage": None,
         "triage_form": None,
+        "lessons": "",
     }
 
 
@@ -263,6 +265,131 @@ def triage_request(fields, session=None):
     return view
 
 
+def practice_restart_incident(question, outcome):
+    """Fill a practice incident from the CPU/restart simulation. Not a real ticket.
+
+    The runaway-worker practice path is the high-CPU web case: CPU at 95 percent,
+    then a simulated restart. Other practice restarts still get nonempty fields
+    from the simulation that just finished. Nothing here is a live host.
+    """
+    details = getattr(outcome, "details", None) or {}
+    process = str(details.get("process") or "worker")
+    old_pid = details.get("old_pid")
+    new_pid = details.get("new_pid")
+    cpu_after = details.get("cpu_percent")
+    asked = " ".join((question or "").split())
+    cpu_case = process == "runaway-worker" or "cpu" in asked.lower()
+    if cpu_case:
+        incident_id = "INC-PRACTICE-CPU"
+        symptom = "Web server CPU is at 95 percent"
+        impact = (
+            "Practice only. Response times would climb while a web worker stays near full CPU. "
+            "No real customer, host, or process was touched"
+        )
+        # Keep the word "restart" out of this observation so the CPU metric
+        # supports resource saturation, and the restart line supports the worker path.
+        cpu_observation = "web server cpu at 95 percent before the simulated worker change"
+    else:
+        incident_id = "INC-PRACTICE-RESTART"
+        symptom = asked or f"Practice restart of process {process}"
+        impact = "Practice only. The restart was simulated and no real process was touched"
+        cpu_observation = (
+            f"practice cpu after a simulated restart of {process} would show about {cpu_after} percent"
+        )
+    timeline = []
+    if asked:
+        timeline.append(f"Asked: {asked}")
+    if cpu_case:
+        timeline.append(
+            "Runbook context: High CPU on web servers. "
+            "Find the hot process, restart that worker, and watch CPU."
+        )
+    timeline.append(f"Simulated restart of {process}: stopped pid {old_pid}, started pid {new_pid}.")
+    timeline.append(
+        f"Practice CPU after that restart would be about {cpu_after} percent. The restart was not real."
+    )
+    return {
+        "incident_id": incident_id,
+        "symptom": symptom,
+        "impact": impact,
+        "timeline": timeline,
+        "evidence": [
+            {
+                "id": "metric-cpu",
+                "source": "practice.metrics",
+                "observation": cpu_observation,
+            },
+            {
+                "id": "sim-restart",
+                "source": "practice.simulation",
+                "observation": (
+                    f"restart of {process} stopped pid {old_pid} and started pid {new_pid}; "
+                    f"practice cpu would show about {cpu_after} percent"
+                ),
+            },
+        ],
+    }
+
+
+def lessons_learned(incident, triage, outcome):
+    """A short handoff a product or engineering team can keep. Practice only."""
+    details = getattr(outcome, "details", None) or {}
+    process = details.get("process") or "the worker"
+    old_pid = details.get("old_pid")
+    new_pid = details.get("new_pid")
+    cpu_after = details.get("cpu_percent")
+    hypotheses = triage.get("hypotheses") or []
+    leading = hypotheses[0].get("title") if hypotheses else "none"
+    linked = []
+    for hypothesis in hypotheses:
+        ids = hypothesis.get("supporting_evidence_ids") or []
+        if ids:
+            linked.append(f"{hypothesis.get('title')} ({', '.join(str(item) for item in ids)})")
+    linked_line = "; ".join(linked) if linked else "no evidence ids matched"
+    return "\n".join([
+        "Practice lessons learned. For a product or engineering handoff. "
+        "No host was changed and no customer was paged.",
+        f"Incident {incident['incident_id']}. Symptom: {incident['symptom']}.",
+        f"Impact to record: {incident['impact']}",
+        (
+            f"The simulation stood in for a restart of {process}: "
+            f"stop pid {old_pid}, start pid {new_pid}, then CPU near {cpu_after} percent. "
+            "Those pids come from the practice table, not from a live process."
+        ),
+        (
+            f"Triage linked evidence as: {linked_line}. "
+            f"Leading hypothesis: {leading}. Root cause: not confirmed."
+        ),
+        (
+            "Still owed on a real ticket: open the dashboard and name the hot process, "
+            "watch CPU for five minutes after any restart, and if a deploy started the spike, roll back. "
+            "Write the time, the process name, and the fix on the ticket. This note does not close one."
+        ),
+        (
+            "Product: the restart stayed behind the approval button. Keep that human gate. "
+            "Ship the symptom, impact, timeline, and evidence with the outcome. "
+            "An empty triage form is not an incident record, and a simulation is not a production change."
+        ),
+    ])
+
+
+def continue_into_practice_triage(view, outcome):
+    """After a simulated restart, fill the triage form and write the handoff.
+
+    Read-only. Does not call the model and does not run another action.
+    """
+    incident = practice_restart_incident(view.get("question") or "", outcome)
+    try:
+        triage = incident_triage.triage(incident)
+    except ValueError as exc:
+        view["error"] = public_error(agent.AgentError("INCIDENT_INVALID", str(exc)))
+        return view
+    view["triage"] = triage
+    view["triage_form"] = triage_form_from_incident(incident)
+    view["lessons"] = lessons_learned(incident, triage, outcome)
+    return view
+
+
 def describe_outcome(outcome):
     """Plain words for an approve or refuse click. No real process was touched."""
     if outcome == "denied":
@@ -317,6 +444,7 @@ def decide(choice, action, session=None):
     elif view["decision_ok"]:
         view["answer"] = "The simulated restart finished. Nothing on a real machine was changed."
         view["stop_plain"] = "You approved the action. Only a simulation ran. No real process was touched."
+        continue_into_practice_triage(view, outcome)
     else:
         view["answer"] = "The simulation did not do the action. Nothing on a real machine was changed."
         view["stop_plain"] = view["answer"]
@@ -493,7 +621,9 @@ def _triage_form(view):
         "This form does not call a model and does not use a network, even in live mode. "
         "It only ranks hypotheses from the evidence you type. "
         "It does not confirm a root cause, and it does not run a check or a restart. "
-        "A restart still has to be asked in the box above, and it still waits for Approve.</p>"
+        "A restart still has to be asked in the box above, and it still waits for approval. "
+        "After a practice restart is approved, these fields fill in from that CPU and restart context, "
+        "and a lessons-learned note follows the triage.</p>"
         "<form method=\"post\" action=\"/triage\">"
         "<label class=\"field\" for=\"incident_id\">Incident id</label>"
         f"<textarea id=\"incident_id\" name=\"incident_id\" rows=\"1\">{_esc(form.get('incident_id'))}</textarea>"
@@ -565,6 +695,18 @@ def _triage_card(triage):
     return "".join(parts)
 
 
+def _lessons_card(lessons):
+    """Plain-text handoff after practice triage. User text is escaped."""
+    if not lessons:
+        return ""
+    return (
+        "<section class=\"card good\"><h2>Lessons learned</h2>"
+        "<p>Practice only. A note a product or engineering team can keep. "
+        "No real process was changed.</p>"
+        f"<p class=\"answer\">{_esc(lessons)}</p></section>"
+    )
+
+
 def _question_form(question):
     return (
         "<form method=\"post\" action=\"/ask\">"
@@ -623,6 +765,9 @@ def render(view=None):
     triage_html = _triage_card(view.get("triage"))
     if triage_html:
         parts.append(triage_html)
+    lessons_html = _lessons_card(view.get("lessons"))
+    if lessons_html:
+        parts.append(lessons_html)
     pending = view.get("pending_action")
     if pending:
         related = view.get("related") or []

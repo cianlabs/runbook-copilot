@@ -14,6 +14,18 @@ python_version: "3.12"
 
 # runbook-copilot
 
+## Public demo
+
+Ask a question, read the sources, approve a practice restart, then read the filled triage and a lessons-learned note. Nothing in this path touches a real process.
+
+1. Open the live app: https://runbook-copilot-c3shmapppprk7ktdashvyei.streamlit.app
+2. The Hugging Face card https://huggingface.co/spaces/itskeeeyin/runbook-copilot is a landing page that links to that app. It does not run the copilot.
+3. Ask **web server CPU is at 95 percent**. Read **Sources**. The practice answer cites High CPU on web servers.
+4. Ask **restart the runaway worker**. Click **Approve and simulate**. The restart is a simulation.
+5. The triage form fills in the incident id, symptom, impact, timeline, and evidence from that CPU and restart practice context. A short **Lessons learned** note is the handoff a product or engineering team can keep. The root cause stays unconfirmed.
+
+Practice mode is the default when no API key is set. Streamlit Community Cloud serves this from `main` after that app redeploys.
+
 **Goal:** an agent that searches a runbook knowledge base (RAG) and takes actions via tool calls, with a human approval step before anything runs.
 
 ## Status
@@ -202,7 +214,7 @@ The page listens only on your own computer. It shows:
 
 If the copilot wants to restart something, the page shows the action and two buttons: **Approve and simulate** and **Do not run**. Asking the question does not run it. Opening the page does not run it. Only the Approve button does, and that path is the same simulation as the terminal (`settle_action` in `agent.py`). No real process is signaled.
 
-The triage form is separate. Submitting it does not approve a waiting restart, and it clears any action that was waiting so an old Approve click cannot run later.
+The triage form is separate. Submitting it does not approve a waiting restart, and it clears any action that was waiting so an old Approve click cannot run later. A successful **Approve and simulate** on a practice restart does the other half: it fills that form from the CPU and restart context (incident id, symptom, impact, timeline, evidence) and adds a lessons-learned note. The restart is still only a simulation.
 
 **Practice mode and live mode.** If `XAI_API_KEY` is not set, the page uses a built-in practice model (`DemoClient` in `app.py`). It searches the runbooks and quotes one sentence from each matching section. It does not call the model network, so you can try the page with no key. If the key is set, the page uses the real model through `agent.make_client`. The key is read from the terminal. It is not printed and it is not written into the page. Set the key in the same terminal, then start `app.py` again.
 
@@ -229,7 +241,7 @@ Set `XAI_API_KEY` in your Terminal tab first when you want the live model. Never
 
 ## Try it on Streamlit Community Cloud
 
-`streamlit_app.py` is the page a stranger can open. It uses the same copilot as `app.py`: citations or an honest "I don't know", and **Approve and simulate** before any simulated restart. Each browser session has its own waiting action. The runbooks are the public samples already in `runbooks/`. No customer data is in this repo.
+`streamlit_app.py` is the page a stranger can open. It uses the same copilot as `app.py`: citations or an honest "I don't know", and **Approve and simulate** before any simulated restart. After that practice restart, the triage form is filled in and a lessons-learned note is shown. Each browser session has its own waiting action. The runbooks are the public samples already in `runbooks/`. No customer data is in this repo. The public path is [Public demo](#public-demo).
 
 **Practice path (no key).** Leave secrets empty. The app uses `DemoClient` in `app.py`. `test_streamlit.py` uses that path. It does not call a model and it does not start a Streamlit server.
 
@@ -312,7 +324,7 @@ Errors have names that say what went wrong:
 - A short request for more detail, with no steps, is still shown when nothing has been read. Any other reply in that spot is `UNGROUNDED_ANSWER`.
 - When a section was actually read, the loop checks that a strong section shares a distinctive word with the question. See "Check the runbook really matches". It does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.
 - That word check can be wrong, and it is not yet proven on the real model.
-- Actions are still a simulation. The only known action is a restart.
+- Actions are still a simulation. The only known action is a restart. After a practice restart is approved, the page fills a practice incident and writes a lessons-learned note. That note is not a real postmortem. The root cause stays unconfirmed.
 - Incident triage matches a few keywords in evidence observations. It does not read the symptom line, and it does not use the runbooks. Broad words such as "read" or "image" can attach an evidence id to the wrong hypothesis. A hit of one keyword clears the missing-evidence note for that hypothesis. Plurals such as "workers" do not match "worker". The three hypotheses are fixed. This has not been tried on a real model. The sample incident is fake.
 - The graph in `graph_agent.py` is a second copy of the loop, for comparison. If you change a guardrail, change it in both files, or the comparison tests will fail. The page still calls `agent.py`.
 

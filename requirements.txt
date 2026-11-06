@@ -1,5 +1,8 @@
-# Space and local agent dependencies.
-# Gradio is preinstalled on a Hugging Face Space. Do not pin it here.
-# Install it yourself for a local preview: pip install gradio
+# Streamlit Community Cloud and the local agent.
+# streamlit_app.py is the public demo. Community Cloud installs this file.
+# Gradio is only for the optional Hugging Face Space, which needs a paid plan
+# on some accounts. Do not pin Gradio here. For a local Space preview:
+# pip install gradio
 openai
 scikit-learn
+streamlit>=1.39

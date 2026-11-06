@@ -24,7 +24,7 @@ Working end to end, with a stub for the action itself. `execute_action` only pri
 - Agent loop: `agent.py` asks the model (Grok, model `grok-build-0.1`, through the xAI API) one step at a time. The model thinks, calls `search_runbooks`, reads the sections, and can search again. It then writes a short plain-language answer and cites the sections that answer relies on, or stops for a named reason. See "The agent loop" below.
 - Graph: `graph_agent.py` is the same loop drawn as boxes and arrows. `agent.py` is unchanged. The page still uses the loop. See "The same loop, drawn as boxes" below.
 - Approval gate: the agent shows the proposed action and related runbook sections, then asks `Approve this action? (y/n)`. Only `y` or `yes` lets it through. The model cannot approve its own action. The local page uses the same rule: nothing runs until you click Approve, and that click only simulates the action.
-- Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. The same page has an incident triage form. The public demo is `streamlit_app.py` on Streamlit Community Cloud. See "The page", "Try it on Streamlit Community Cloud", and "Incident triage" below.
+- Page: `app.py` is a small local web page so you can ask a question without the terminal. It shows the numbered steps, the Sources, the stop reason in plain words, and the step-by-step trace. The same page has an incident triage form. The public demo is `streamlit_app.py` on Streamlit Community Cloud. A free Hugging Face hub card for that demo is the Static Space at https://huggingface.co/spaces/itskeeeyin/runbook-copilot (a landing page that points at Streamlit; it does not run the app). See "The page", "Try it on Streamlit Community Cloud", and "Incident triage" below.
 
 ## How it works
 
@@ -252,13 +252,15 @@ Streamlit prints a local URL, usually http://127.0.0.1:8501. No key means practi
 7. Click **Deploy**. Wait until the app status is running. The public URL is the one Streamlit shows at the top of that app (it ends in `.streamlit.app`).
 8. Optional live model: on the running app, open the menu (⋮) → **Settings** → **Secrets**, paste the `XAI_API_KEY` line from above, save, then menu → **Reboot app**. Skip this step to stay in practice mode.
 
-Share that `.streamlit.app` URL. A visitor can ask a question with no account and no API key.
+Share that `.streamlit.app` URL. A visitor can ask a question with no account and no API key. The live public demo is https://runbook-copilot-c3shmapppprk7ktdashvyei.streamlit.app.
+
+**Free Hugging Face hub card.** https://huggingface.co/spaces/itskeeeyin/runbook-copilot is a Static Space (`sdk: static`). It is a landing page on a free account. It links to the Streamlit demo above and to this repository. It does not run Gradio and does not need a paid Hugging Face plan.
 
 ## Optional: Hugging Face Gradio Space
 
 `space/app.py` is the same demo as a Gradio app. The YAML block at the top of this file is the Space config (`sdk: gradio`, `app_file: space/app.py`). Hugging Face reads it when this repository is the Space.
 
-That Space is optional. A free Hugging Face account cannot create a Gradio Space when the account is required to be on a paid (PRO) plan. Use Streamlit Community Cloud above for the public demo. If you already have PRO, the Space still works: **Settings → Secrets**, name `XAI_API_KEY`, then restart. Without that secret the Space stays in practice mode. `test_space.py` covers the handlers without starting Gradio.
+That Space is optional. Creating a Gradio Space still needs a paid Hugging Face plan (PRO) on a free account. The free hub card is the Static Space above; it is a landing page, not this Gradio app. Use Streamlit Community Cloud above for the public demo. If you already have PRO, the Space still works: **Settings → Secrets**, name `XAI_API_KEY`, then restart. Without that secret the Space stays in practice mode. `test_space.py` covers the handlers without starting Gradio.
 
 ```
 .venv/bin/pip install gradio
@@ -299,7 +301,7 @@ Errors have names that say what went wrong:
 
 - Search folds simple word endings, so "deployment" matches "deploy". A later upgrade could switch this to embeddings.
 - The runbooks are a small sample.
-- The local page listens only on your computer (`127.0.0.1`, port 8000). The public demo is [Try it on Streamlit Community Cloud](#try-it-on-streamlit-community-cloud). The Gradio Space is optional and may require a paid Hugging Face plan.
+- The local page listens only on your computer (`127.0.0.1`, port 8000). The public demo is [Try it on Streamlit Community Cloud](#try-it-on-streamlit-community-cloud). A free Static Space (https://huggingface.co/spaces/itskeeeyin/runbook-copilot) is a hub landing page that links to that demo. The Gradio Space is still optional and needs a paid Hugging Face plan (PRO).
 - Practice mode quotes one sentence from each matching section. The real model is asked to paraphrase. A practice-mode question that starts with "restart" proposes that restart and does not search first. A question that only mentions restarting, such as "what does the runbook say about restarting", still searches.
 - A short request for more detail, with no steps, is still shown when nothing has been read. Any other reply in that spot is `UNGROUNDED_ANSWER`.
 - When a section was actually read, the loop checks that a strong section shares a distinctive word with the question. See "Check the runbook really matches". It does not check that every sentence of the answer is supported by that section. It does refuse to invent citations: a Sources list written by the model is removed and replaced by the citation rule.

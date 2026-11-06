@@ -454,12 +454,176 @@ def guardrails():
     c.save("guardrails.png")
 
 
+def _center(canvas, box, text, size, fill, weight="bold"):
+    x1, y1, x2, y2 = box
+    width = canvas.text_width(text, size, weight)
+    canvas.text(((x1 + x2 - width) / 2, (y1 + y2) / 2 - size / 2 - 1), text, size, fill, weight)
+
+
+def graph_loop():
+    """The state machine in graph_agent.py, README, and docs/graph.md."""
+    c = Canvas(1760, 1460)
+    header(
+        c,
+        "The same loop, drawn as boxes",
+        "graph_agent.py is a state machine. You stand in one box. That box names the next box. The page still uses agent.py.",
+    )
+    c.label((48, 148), "Plan, then one of four exits")
+
+    start = (48, 186, 200, 274)
+    c.rounded(start, WHITE, (176, 186, 210), radius=44)
+    _center(c, start, "Start", 20, INK)
+    c.arrow_right(208, 268, 230)
+    c.card(
+        (276, 176, 620, 304),
+        PURPLE[0],
+        PURPLE[1],
+        "PLAN",
+        "Reads the request, or the sections just found, and picks the next box.",
+        title_fill=PURPLE[2],
+        title_size=20,
+        body_size=15,
+    )
+
+    c.arrow_right(628, 748, 220)
+    c.text((640, 188), "Action request", 13, ORANGE[2], "semibold")
+    c.card(
+        (756, 176, 1188, 292),
+        ORANGE[0],
+        ORANGE[1],
+        "ACTION_GATE",
+        "Ask a person y or n. The model cannot approve itself.",
+        title_fill=ORANGE[2],
+        title_size=18,
+        body_size=15,
+    )
+    c.arrow_right(1196, 1288, 234)
+    stop_action = (1296, 196, 1712, 272)
+    c.rounded(stop_action, WHITE, ORANGE[1], radius=38)
+    _center(c, stop_action, "Stop: ACTION_REQUESTED", 15, ORANGE[2])
+
+    # Incident triage leaves the bottom of PLAN and stays clear of the card.
+    c.line((448, 304), (448, 360))
+    c.line((448, 360), (748, 360))
+    c.arrow_right(748, 828, 360)
+    c.text((468, 332), "Incident triage", 13, TEAL[2], "semibold")
+    c.card(
+        (836, 320, 1268, 440),
+        TEAL[0],
+        TEAL[1],
+        "TRIAGE",
+        "Rank hypotheses from the evidence. Nothing runs, and no cause is confirmed.",
+        title_fill=TEAL[2],
+        title_size=18,
+        body_size=15,
+    )
+    c.arrow_right(1276, 1356, 380)
+    stop_triage = (1364, 342, 1712, 418)
+    c.rounded(stop_triage, WHITE, TEAL[1], radius=38)
+    _center(c, stop_triage, "Stop: INCIDENT_TRIAGED", 14, TEAL[2])
+
+    c.label((48, 478), "Question path")
+    c.arrow_down(180, 304, 556)
+    c.text((196, 400), "Question", 14, GREEN[2], "semibold")
+    # Wrote an answer: drop beside PLAN, then into the top of CHECK.
+    c.line((560, 304), (560, 500))
+    c.line((560, 500), (760, 500))
+    c.arrow_down(760, 500, 556)
+    c.text((572, 468), "Wrote an answer", 14, YELLOW[2], "semibold")
+
+    c.card(
+        (48, 564, 460, 720),
+        GREEN[0],
+        GREEN[1],
+        "SEARCH",
+        "Calls search_runbooks. It only reads. It does not change a system.",
+        title_fill=GREEN[2],
+        title_size=20,
+        body_size=15,
+    )
+    c.arrow_right(468, 548, 630)
+    c.card(
+        (556, 564, 1040, 740),
+        YELLOW[0],
+        YELLOW[1],
+        "CHECK",
+        "The same guardrails as the loop. A real match goes on. A miss goes to IDK.",
+        title_fill=YELLOW[2],
+        title_size=20,
+        body_size=15,
+    )
+    c.arrow_right(1048, 1148, 630)
+    c.text((1056, 598), "miss", 13, RED[2], "semibold")
+    c.card(
+        (1156, 564, 1712, 740),
+        RED[0],
+        RED[1],
+        "IDK",
+        "Nothing matched. Scores under 0.15. Only a similar runbook. An answer that cites nothing. Or the 4-step limit.",
+        title_fill=RED[2],
+        title_size=20,
+        body_size=15,
+    )
+    c.arrow_down(1434, 740, 808)
+    stop_idk = (1208, 816, 1660, 892)
+    c.rounded(stop_idk, WHITE, RED[1], radius=38)
+    _center(c, stop_idk, "Stop: I do not know", 18, RED[2])
+
+    c.arrow_down(798, 740, 900)
+    c.text((48, 836), "To ANSWER: more detail, strong sections, or citations that look good", 14, BLUE[2], "semibold")
+
+    c.card(
+        (48, 908, 1040, 1076),
+        BLUE[0],
+        BLUE[1],
+        "ANSWER",
+        "Writes the reply in plain words and lists only sections search actually returned.",
+        title_fill=BLUE[2],
+        title_size=20,
+        body_size=16,
+    )
+    c.arrow_right(1048, 1168, 980)
+    c.text((1056, 948), "Save the reply", 13, BLUE[2], "semibold")
+    stop_ok = (1176, 932, 1588, 1028)
+    c.rounded(stop_ok, WHITE, BLUE[1], radius=38)
+    _center(c, stop_ok, "Stop: ANSWERED", 18, BLUE[2])
+
+    # Return edges travel in the left and right gutters, below SEARCH and CHECK.
+    c.line((100, 908), (100, 800))
+    c.arrow_up(100, 800, 720)
+    c.text((112, 768), "Search again", 13, GREEN[2], "semibold")
+    c.line((980, 908), (980, 800))
+    c.arrow_up(980, 800, 740)
+    c.text((992, 768), "Check the citations", 13, YELLOW[2], "semibold")
+
+    c.label((48, 1120), "How a normal question walks")
+    c.rounded((48, 1156, 1712, 1400), WHITE, (201, 209, 228), radius=16)
+    c.text((72, 1180), "PLAN  →  SEARCH  →  CHECK  →  ANSWER  →  CHECK  →  ANSWER", 18, INK, "bold")
+    notes = [
+        "The first ANSWER asks for words. CHECK makes sure they cite a section search really returned. The second ANSWER saves the reply.",
+        "IDK is the stop for NO_RELEVANT_RUNBOOK, WEAK_MATCH_ONLY, UNGROUNDED_ANSWER, and MAX_STEPS_REACHED. Four model calls is the most.",
+        "ACTION_GATE and TRIAGE leave the question path. A person still has to approve any action. Triage does not run a check or a restart.",
+    ]
+    y = 1232
+    for note in notes:
+        c.rounded((76, y + 6, 88, y + 18), PURPLE[1], PURPLE[1], radius=6, width=1)
+        for line in c.wrap(note, 16, 1580):
+            c.text((100, y), line, 16, MUTED)
+            y += 24
+        y += 12
+    c.save("graph-loop.png")
+
+
 def main():
     agent_loop()
     approval_gate()
     stop_reasons()
     guardrails()
-    print("Wrote images/agent-loop.png, images/approval-gate.png, images/stop-reasons.png, images/guardrails.png")
+    graph_loop()
+    print(
+        "Wrote images/agent-loop.png, images/approval-gate.png, "
+        "images/stop-reasons.png, images/guardrails.png, images/graph-loop.png"
+    )
 
 
 if __name__ == "__main__":

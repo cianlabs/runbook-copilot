@@ -261,9 +261,9 @@ Streamlit prints a local URL, usually http://127.0.0.1:8501. No key means practi
 
 **What you still click, once, on share.streamlit.io.** This repo cannot create the Cloud app for you. Do this after the Streamlit pull request is on `main` (or point the branch at the pull request branch if you want to try it first).
 
-1. Open https://share.streamlit.io/ and sign in with GitHub as the account that can read `cianlabs/runbook-copilot`.
+1. Open https://share.streamlit.io/ and sign in with GitHub as the account that can read `itskeeeyin/runbook-copilot`.
 2. Click **Create app**.
-3. Repository: `cianlabs/runbook-copilot`.
+3. Repository: `itskeeeyin/runbook-copilot`.
 4. Branch: `main`.
 5. Main file path: `streamlit_app.py`.
 6. Leave the app public. This demo does not need extra Python packages beyond `requirements.txt`.

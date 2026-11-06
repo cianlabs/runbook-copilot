@@ -110,6 +110,28 @@ def _related_text(session):
     return "\n".join(lines)
 
 
+TRIAGE_WIDGET_KEYS = {
+    "incident_id": "triage_incident_id",
+    "symptom": "triage_symptom",
+    "impact": "triage_impact",
+    "timeline": "triage_timeline",
+    "evidence": "triage_evidence",
+}
+
+
+def sync_triage_form(store, session):
+    """Copy a filled practice form into the widgets. Empty forms are left alone.
+
+    Call this before the widgets are created on the next run. Streamlit shows
+    the value stored under each key.
+    """
+    form = (getattr(session, "last_view", None) or {}).get("triage_form") or {}
+    if not any(str(form.get(name) or "").strip() for name in TRIAGE_WIDGET_KEYS):
+        return
+    for name, key in TRIAGE_WIDGET_KEYS.items():
+        store[key] = form.get(name) or ""
+
+
 def draw(fields, session):
     """Show the last result. Runbook text is plain text, not HTML."""
     error, stop_plain, stop_reason, answer, sources, trace, pending, decision, triage, _session = fields
@@ -144,6 +166,7 @@ def draw(fields, session):
         yes, no = st.columns(2)
         if yes.button("Approve and simulate", type="primary"):
             st.session_state.last_fields = on_approve(session)
+            sync_triage_form(st.session_state, session)
             st.rerun()
         if no.button("Do not run"):
             st.session_state.last_fields = on_refuse(session)
@@ -169,6 +192,8 @@ def main():
         "Ask in ordinary words. You will see the steps, where they came from, "
         "and why the copilot stopped. If it wants to do something, nothing runs "
         "until you click **Approve and simulate**. That click only runs a simulation. "
+        "In practice mode it then fills the triage form from that CPU restart and "
+        "adds a lessons note. Nothing on a real machine changes. "
         "The runbooks in this demo are public samples, not customer data."
     )
     st.markdown(mode_banner())
@@ -195,16 +220,21 @@ def main():
     st.subheader("Triage an incident")
     st.write(
         "Type a practice incident, or use the sample. "
+        "After a simulated CPU restart, practice mode fills these fields from that restart. "
         "This form does not call a model and does not use a network, even in live mode. "
         "It only ranks hypotheses from the evidence you type. "
         "It does not confirm a root cause, and it does not run a check or a restart. "
         "A restart still has to be asked above, and it still waits for Approve."
     )
-    incident_id = st.text_input("Incident id")
-    symptom = st.text_area("Symptom", height=68)
-    impact = st.text_area("Impact", height=68)
-    timeline = st.text_area("Timeline, one note per line", height=80)
-    evidence = st.text_area("Evidence, one per line: id | source | observation", height=100)
+    incident_id = st.text_input("Incident id", key="triage_incident_id")
+    symptom = st.text_area("Symptom", height=68, key="triage_symptom")
+    impact = st.text_area("Impact", height=68, key="triage_impact")
+    timeline = st.text_area("Timeline, one note per line", height=80, key="triage_timeline")
+    evidence = st.text_area(
+        "Evidence, one per line: id | source | observation",
+        height=100,
+        key="triage_evidence",
+    )
     triage_col, sample_col = st.columns(2)
     if triage_col.button("Triage this incident"):
         st.session_state.last_fields = on_triage(
@@ -216,6 +246,15 @@ def main():
             incident_id, symptom, impact, timeline, evidence, session, sample=True
         )
         st.rerun()
+
+    lessons = (getattr(session, "last_view", None) or {}).get("lessons") or ""
+    if lessons:
+        st.subheader("Lessons learned")
+        st.caption(
+            "For a product or engineering reader. Practice only. "
+            "This note does not run a check, a restart, or a roll back."
+        )
+        st.text(lessons)
 
 
 if __name__ == "__main__":

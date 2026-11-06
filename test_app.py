@@ -106,6 +106,29 @@ def test_do_not_run_denies_and_approve_only_simulates(monkeypatch, capsys):
     html = app.render(approved)
     assert "Approve and simulate" not in html  # the button is gone after the click
     assert "Nothing on a real machine was changed" in html
+    assert approved["triage_form"]["incident_id"] == "INC-PRACTICE-CPU"
+    assert "CPU" in approved["triage_form"]["symptom"]
+    assert approved["triage_form"]["impact"].strip()
+    assert "metric-cpu" in approved["triage_form"]["evidence"]
+    assert approved["triage"]["confirmed_root_cause"] is None
+    assert "not confirmed" in approved["lessons"].lower()
+    assert "1842" in approved["lessons"]
+    assert "INC-PRACTICE-CPU" in html
+    assert "Lessons learned" in html
+
+
+def test_live_mode_approve_does_not_fill_the_practice_form(monkeypatch, capsys):
+    monkeypatch.setenv("XAI_API_KEY", "sk-live-test-secret-do-not-leak")
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    view = app.ask("restart the runaway worker", client=app.DemoClient())
+    approved = app.decide("yes", view["pending_action"])
+    assert approved["decision_ok"] is True
+    assert "Simulated only" in approved["decision"]
+    assert not approved.get("triage")
+    assert not approved.get("triage_form")
+    assert not approved.get("lessons")
+    assert "sk-live-test-secret-do-not-leak" not in app.render(approved)
+    assert "Practice triage" not in capsys.readouterr().out
 
 
 def test_a_word_other_than_yes_does_not_approve(monkeypatch, capsys):

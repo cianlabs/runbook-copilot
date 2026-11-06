@@ -81,6 +81,50 @@ def test_two_sessions_do_not_share_a_waiting_action(monkeypatch):
     assert app.pending_action is None
 
 
+def test_practice_approve_fills_the_triage_form_and_writes_lessons(monkeypatch):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    session = streamlit_app.ensure_session(_store())
+    streamlit_app.on_ask("restart the runaway worker", session)
+    fields = streamlit_app.on_approve(session)
+    assert "Simulated only" in fields[7]
+    assert "No real process was touched" in fields[7]
+    assert "not confirmed" in fields[8].lower()
+    assert "No action was run" in fields[8]
+    assert session.pending_action is None
+    form = session.last_view["triage_form"]
+    assert form["incident_id"] == "INC-PRACTICE-CPU"
+    assert "CPU" in form["symptom"]
+    assert form["impact"].strip()
+    assert "95 percent" in form["timeline"]
+    assert "metric-cpu" in form["evidence"]
+    assert "sim-restart" in form["evidence"]
+    lessons = session.last_view["lessons"]
+    assert "not confirmed" in lessons.lower()
+    assert "1842" in lessons and "2107" in lessons
+    assert "Lead, not a cause" in lessons
+    store = {}
+    streamlit_app.sync_triage_form(store, session)
+    assert store["triage_incident_id"] == "INC-PRACTICE-CPU"
+    assert store["triage_symptom"] == form["symptom"]
+    assert store["triage_impact"] == form["impact"]
+    assert store["triage_timeline"] == form["timeline"]
+    assert store["triage_evidence"] == form["evidence"]
+
+
+def test_refuse_does_not_fill_triage_or_write_lessons(monkeypatch):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    session = streamlit_app.ensure_session(_store())
+    streamlit_app.on_ask("restart the runaway worker", session)
+    refused = streamlit_app.on_refuse(session)
+    assert "Nothing was run" in refused[7]
+    assert refused[8] == ""
+    assert not session.last_view.get("triage_form")
+    assert not session.last_view.get("lessons")
+    store = {"triage_incident_id": "keep-me"}
+    streamlit_app.sync_triage_form(store, session)
+    assert store["triage_incident_id"] == "keep-me"
+
+
 def test_practice_sample_triage_does_not_run_an_action():
     session = streamlit_app.ensure_session(_store())
     session.pending_action = "restart the process 'runaway-worker'"

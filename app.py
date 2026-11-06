@@ -263,6 +263,115 @@ def triage_request(fields, session=None):
     return view
 
 
+def practice_cpu_incident(details):
+    """A practice incident for the sample CPU restart. Not a real ticket.
+
+    The words come from the High CPU runbook and from the simulation that
+    just finished. Nothing here is a customer, a host, or a live metric.
+    """
+    name = details.get("process") or "runaway-worker"
+    old_pid = details.get("old_pid")
+    new_pid = details.get("new_pid")
+    cpu = details.get("cpu_percent")
+    return {
+        "incident_id": "INC-PRACTICE-CPU",
+        "symptom": "Web servers show CPU above ninety percent and response times climb",
+        "impact": (
+            "Practice demo only. The sample runbook treats a runaway worker as the "
+            "common cause. No customer system was touched"
+        ),
+        "timeline": [
+            "Sample question: web server CPU is at 95 percent.",
+            "Cited runbook: High CPU on web servers (sample_runbook.txt).",
+            (
+                f"Approved simulation: restart process {name}. "
+                f"Stopped pid {old_pid} and started pid {new_pid}. "
+                f"CPU would show about {cpu}%."
+            ),
+        ],
+        "evidence": [
+            {
+                "id": "metric-cpu",
+                "source": "sample_runbook.txt",
+                "observation": "web servers show CPU above ninety percent and response times climb",
+            },
+            {
+                "id": "sim-restart",
+                "source": "practice-simulation",
+                "observation": (
+                    f"worker restart simulated for {name}. "
+                    f"Old pid {old_pid} stopped and new pid {new_pid} started."
+                ),
+            },
+        ],
+    }
+
+
+def lessons_for_cpu_restart(details, triage):
+    """A short note a product or engineering team can use. Practice only."""
+    name = details.get("process") or "runaway-worker"
+    old_pid = details.get("old_pid")
+    new_pid = details.get("new_pid")
+    cpu = details.get("cpu_percent")
+    lines = [
+        "Practice only. No process was signaled, and the root cause is not confirmed.",
+        (
+            "Incident INC-PRACTICE-CPU. Web servers showed CPU above ninety percent. "
+            "The cited runbook, High CPU on web servers, says a runaway worker is the "
+            "common cause: restart that worker, watch CPU for five minutes, and record "
+            "the time, the process name, and the fix."
+        ),
+        (
+            f"The approved simulation restarted {name}: stopped pid {old_pid}, "
+            f"started pid {new_pid}, and CPU would show about {cpu}%. "
+            "That is a drill. It is not a fix on a machine, and it is not a reason to close the ticket."
+        ),
+    ]
+    for hypothesis in (triage or {}).get("hypotheses") or []:
+        ids = hypothesis.get("supporting_evidence_ids") or []
+        step = hypothesis.get("next_diagnostic_step") or ""
+        title = hypothesis.get("title") or "Hypothesis"
+        if ids:
+            lines.append(
+                f"Lead, not a cause: {title} matches {', '.join(ids)}. "
+                f"Next check was not run: {step}"
+            )
+        else:
+            lines.append(f"No evidence in this practice incident for {title}.")
+    lines.append(
+        "Do not roll back from this note. A roll back still needs its own approval. "
+        "Asking the question did not run the restart. Only the approval button did, "
+        "and triage did not queue another restart."
+    )
+    return "\n".join(lines)
+
+
+def attach_practice_followup(view, outcome):
+    """After a practice CPU restart, triage that incident and keep the form.
+
+    Live mode does not do this. A refused or failed simulation does not do this.
+    The triage call does not run an action and does not touch a real process.
+    """
+    if current_mode() != "practice":
+        return view
+    if not (isinstance(outcome, agent.ActionResult) and outcome.ok):
+        return view
+    details = outcome.details or {}
+    if details.get("process") != "runaway-worker":
+        return view
+    data = practice_cpu_incident(details)
+    try:
+        agent.run_incident_triage(data)
+    except agent.AgentError as err:
+        view["error"] = public_error(err)
+        return view
+    triage = agent.last_trace.triage if agent.last_trace is not None else None
+    view["triage"] = triage
+    view["triage_form"] = triage_form_from_incident(data)
+    view["lessons"] = lessons_for_cpu_restart(details, triage)
+    return view
+
+
 def describe_outcome(outcome):
     """Plain words for an approve or refuse click. No real process was touched."""
     if outcome == "denied":
@@ -320,6 +429,8 @@ def decide(choice, action, session=None):
     else:
         view["answer"] = "The simulation did not do the action. Nothing on a real machine was changed."
         view["stop_plain"] = view["answer"]
+    if view.get("decision_ok"):
+        attach_practice_followup(view, outcome)
     sess.last_view = view
     return view
 
@@ -652,6 +763,12 @@ def render(view=None):
         parts.append(
             f"<section class=\"card {kind}\"><h2>Your decision</h2>"
             f"<p>{_esc(decision)}</p></section>"
+        )
+    lessons = view.get("lessons")
+    if lessons:
+        parts.append(
+            "<section class=\"card\"><h2>Lessons learned</h2>"
+            f"<p class=\"answer\">{_esc(lessons)}</p></section>"
         )
     events = view.get("events") or []
     if events:

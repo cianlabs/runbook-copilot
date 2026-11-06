@@ -26,13 +26,16 @@ The Hugging Face page https://huggingface.co/spaces/itskeeeyin/runbook-copilot i
 
 1. **Ask.** Open “Try a sample question”, pick `web server CPU is at 95 percent`, and click **Ask the copilot**.
 2. **Sources.** The page lists the runbook section it used. For that question the source is High CPU on web servers (`sample_runbook.txt`). A question the runbooks do not cover says it does not know and cites nothing.
-3. **Approve or abstain.** Pick `restart the runaway worker` and ask again. The page shows the action and waits. **Approve and simulate** only pretends to restart a process. **Do not run** does nothing.
+3. **Approve or abstain.** Pick `restart the runaway worker` and ask again. Nothing runs until you click **Approve and simulate**. **Do not run** abstains and stops. Approve only pretends to restart that worker. No real process is signaled.
+4. **Triage, then lessons.** After that simulation, practice mode fills **Triage an incident**: incident id, symptom, impact, timeline, and evidence, using the CPU restart it just simulated (`INC-PRACTICE-CPU`). It ranks hypotheses and does not confirm a root cause. **Lessons learned**, under the form, is a short note for a product or engineering team. It is practice only. **Do not run** does not fill the form.
 
-![Practice mode: the CPU question, the answer, and the cited source](docs/demo/practice-ask-sources.png)
+The pictures and the 34-second video are the live app as it is deployed today: ask, then sources, then approve. They were taken on https://runbook-copilot-c3shmapppprk7ktdashvyei.streamlit.app. That deployment does not yet fill the triage form or show **Lessons learned**. Those appear on this URL after this change is merged and Streamlit Community Cloud redeploys.
 
-![The restart waits on Approve and simulate or Do not run](docs/demo/practice-approve.png)
+![Live app: practice mode, the CPU question, and the cited source](docs/demo/public-ask-sources.png)
 
-The same path on video, about 40 seconds: [ask, then sources, then approve](docs/demo/practice-ask-sources-approve.mp4).
+![Live app: Approve and simulate finishes as a practice restart](docs/demo/public-approve.png)
+
+[Live app: ask, sources, then approve](docs/demo/public-ask-sources-approve.mp4)
 
 ## Status
 
@@ -220,7 +223,7 @@ The page listens only on your own computer. It shows:
 
 If the copilot wants to restart something, the page shows the action and two buttons: **Approve and simulate** and **Do not run**. Asking the question does not run it. Opening the page does not run it. Only the Approve button does, and that path is the same simulation as the terminal (`settle_action` in `agent.py`). No real process is signaled.
 
-The triage form is separate. Submitting it does not approve a waiting restart, and it clears any action that was waiting so an old Approve click cannot run later.
+The triage form is separate from the question box. Submitting it does not approve a waiting restart, and it clears any action that was waiting so an old Approve click cannot run later. On the Streamlit page, a successful **Approve and simulate** in practice mode for the sample CPU restart then fills that form (`INC-PRACTICE-CPU`) and writes **Lessons learned**. Refuse does not. The ranking still does not run a restart, and it still does not confirm a root cause.
 
 **Practice mode and live mode.** If `XAI_API_KEY` is not set, the page uses a built-in practice model (`DemoClient` in `app.py`). It searches the runbooks and quotes one sentence from each matching section. It does not call the model network, so you can try the page with no key. If the key is set, the page uses the real model through `agent.make_client`. The key is read from the terminal. It is not printed and it is not written into the page. Set the key in the same terminal, then start `app.py` again.
 

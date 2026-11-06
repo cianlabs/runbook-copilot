@@ -79,6 +79,28 @@ def test_two_sessions_do_not_share_a_waiting_action(monkeypatch):
     assert app.pending_action is None
 
 
+def test_approve_follow_up_fills_the_form_and_the_note(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [])
+    session = _session()
+    space_app.on_ask("restart the runaway worker", session)
+    fields = space_app.on_approve(session)
+    followed = space_app.ui_follow_up(fields)
+    incident_id, symptom, impact, timeline, evidence, lessons = followed[-6:]
+    assert incident_id == "INC-PRACTICE-CPU"
+    assert "95" in symptom
+    assert impact.strip()
+    assert "runaway-worker" in timeline
+    assert "metric-cpu" in evidence
+    assert "sim-restart" in evidence
+    assert "Practice lessons learned" in lessons
+    assert "not confirmed" in lessons.lower()
+    assert "fake restart done" not in lessons.lower()
+    assert "not confirmed" in fields[8]
+    assert "Simulated only" in fields[7]
+    assert session.pending_action is None
+    assert capsys.readouterr().out.count("Sending SIGTERM") == 1
+
+
 def test_practice_sample_triage_does_not_run_an_action():
     session = _session()
     session.pending_action = "restart the process 'runaway-worker'"

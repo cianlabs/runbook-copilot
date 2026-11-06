@@ -171,6 +171,31 @@ def on_refuse(session):
     return on_decide("no", session)
 
 
+def ui_follow_up(fields):
+    """Add the filled triage boxes and the lessons note for the Gradio widgets.
+
+    Handlers used by tests stay a 10-value result. The page wraps them with this.
+    """
+    session = fields[-1]
+    view = getattr(session, "last_view", None) or {}
+    form = view.get("triage_form") or {}
+    return fields + (
+        form.get("incident_id") or "",
+        form.get("symptom") or "",
+        form.get("impact") or "",
+        form.get("timeline") or "",
+        form.get("evidence") or "",
+        view.get("lessons") or "",
+    )
+
+
+def _ui(handler):
+    def wrapped(*args):
+        return ui_follow_up(handler(*args))
+
+    return wrapped
+
+
 def on_triage_form(incident_id, symptom, impact, timeline, evidence, session):
     return on_triage(incident_id, symptom, impact, timeline, evidence, session, sample=False)
 
@@ -206,6 +231,7 @@ def build():
             "Ask in ordinary words. You will see the steps, where they came from, "
             "and why the copilot stopped. If it wants to do something, nothing runs "
             "until you click **Approve and simulate**. That click only runs a simulation. "
+            "On a practice restart it also fills the triage form and writes a lessons-learned note. "
             "The runbooks in this demo are public samples, not customer data."
         )
         gr.Markdown(mode_banner())
@@ -239,7 +265,9 @@ def build():
             "Clicking **Approve and simulate** only simulates the restart. "
             "No real process is signaled. **Do not run** runs nothing. "
             "The button uses the action this session is waiting on. "
-            "Editing the box does not change what can be approved."
+            "Editing the box does not change what can be approved. "
+            "After a practice restart, the triage fields below fill in from that "
+            "CPU and restart context, and a lessons-learned note follows."
         )
         with gr.Row():
             yes_btn = gr.Button("Approve and simulate")
@@ -251,7 +279,8 @@ def build():
             "This form does not call a model and does not use a network, even in live mode. "
             "It only ranks hypotheses from the evidence you type. "
             "It does not confirm a root cause, and it does not run a check or a restart. "
-            "A restart still has to be asked above, and it still waits for Approve."
+            "A restart still has to be asked above, and it still waits for approval. "
+            "After you approve a practice restart, these fields fill in from that CPU and restart context."
         )
         incident_id = gr.Textbox(label="Incident id")
         symptom = gr.Textbox(label="Symptom", lines=2)
@@ -265,6 +294,7 @@ def build():
             triage_btn = gr.Button("Triage this incident")
             sample_btn = gr.Button("Triage the practice sample")
         triage_out = gr.Textbox(label="Incident triage", lines=12)
+        lessons = gr.Textbox(label="Lessons learned", lines=8)
 
         outputs = [
             error,
@@ -277,17 +307,23 @@ def build():
             decision,
             triage_out,
             session,
+            incident_id,
+            symptom,
+            impact,
+            timeline,
+            evidence,
+            lessons,
         ]
-        ask_btn.click(on_ask, [question, session], outputs)
-        yes_btn.click(on_approve, [session], outputs)
-        no_btn.click(on_refuse, [session], outputs)
+        ask_btn.click(_ui(on_ask), [question, session], outputs)
+        yes_btn.click(_ui(on_approve), [session], outputs)
+        no_btn.click(_ui(on_refuse), [session], outputs)
         triage_btn.click(
-            on_triage_form,
+            _ui(on_triage_form),
             [incident_id, symptom, impact, timeline, evidence, session],
             outputs,
         )
         sample_btn.click(
-            on_triage_sample,
+            _ui(on_triage_sample),
             [incident_id, symptom, impact, timeline, evidence, session],
             outputs,
         )

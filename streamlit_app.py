@@ -90,6 +90,47 @@ def on_refuse(session):
     return space_app.on_refuse(session)
 
 
+# Widget keys for the triage form. Set them before the widgets are created
+# so an approval can fill the boxes instead of leaving them blank.
+TRIAGE_WIDGET_KEYS = (
+    ("incident_id", "triage_incident_id"),
+    ("symptom", "triage_symptom"),
+    ("impact", "triage_impact"),
+    ("timeline", "triage_timeline"),
+    ("evidence", "triage_evidence"),
+)
+
+
+def sync_triage_fields(store, session):
+    """Copy a filled practice incident onto the triage widgets.
+
+    `store` is st.session_state or a dict. No-op when the form is still empty.
+    """
+    view = getattr(session, "last_view", None) or {}
+    form = view.get("triage_form") or {}
+    if not any(str(form.get(name) or "").strip() for name, _key in TRIAGE_WIDGET_KEYS):
+        return False
+    for name, key in TRIAGE_WIDGET_KEYS:
+        store[key] = form.get(name) or ""
+    return True
+
+
+def approve_and_fill(store, session):
+    """Approve the waiting practice action, then fill the triage form.
+
+    The simulation stays inside on_approve. This does not touch a real process.
+    """
+    store["last_fields"] = on_approve(session)
+    sync_triage_fields(store, session)
+    return store["last_fields"]
+
+
+def _on_approve_click():
+    """Streamlit callback. Runs before the triage widgets are created."""
+    session = ensure_session(st.session_state)
+    approve_and_fill(st.session_state, session)
+
+
 def on_triage(incident_id, symptom, impact, timeline, evidence, session, sample=False):
     return space_app.on_triage(
         incident_id, symptom, impact, timeline, evidence, session, sample=sample
@@ -139,12 +180,12 @@ def draw(fields, session):
         st.caption(
             "Approve and simulate only pretends to restart a process. "
             "No real process is signaled. Do not run does nothing. "
-            "The button uses the action this browser session is waiting on."
+            "The button uses the action this browser session is waiting on. "
+            "After a practice restart, the triage form below fills in from that "
+            "CPU and restart context, and a lessons-learned note follows."
         )
         yes, no = st.columns(2)
-        if yes.button("Approve and simulate", type="primary"):
-            st.session_state.last_fields = on_approve(session)
-            st.rerun()
+        yes.button("Approve and simulate", type="primary", on_click=_on_approve_click)
         if no.button("Do not run"):
             st.session_state.last_fields = on_refuse(session)
             st.rerun()
@@ -154,6 +195,14 @@ def draw(fields, session):
     if triage:
         st.subheader("Incident triage")
         st.text(triage)
+    lessons = (getattr(session, "last_view", None) or {}).get("lessons") or ""
+    if lessons:
+        st.subheader("Lessons learned")
+        st.caption(
+            "Practice only. A note a product or engineering team can keep. "
+            "No real process was changed."
+        )
+        st.text(lessons)
 
 
 def main():
@@ -169,6 +218,7 @@ def main():
         "Ask in ordinary words. You will see the steps, where they came from, "
         "and why the copilot stopped. If it wants to do something, nothing runs "
         "until you click **Approve and simulate**. That click only runs a simulation. "
+        "On a practice restart it also fills the triage form and writes a lessons-learned note. "
         "The runbooks in this demo are public samples, not customer data."
     )
     st.markdown(mode_banner())
@@ -198,13 +248,18 @@ def main():
         "This form does not call a model and does not use a network, even in live mode. "
         "It only ranks hypotheses from the evidence you type. "
         "It does not confirm a root cause, and it does not run a check or a restart. "
-        "A restart still has to be asked above, and it still waits for Approve."
+        "A restart still has to be asked above, and it still waits for approval. "
+        "After you approve a practice restart, these fields fill in from that CPU and restart context."
     )
-    incident_id = st.text_input("Incident id")
-    symptom = st.text_area("Symptom", height=68)
-    impact = st.text_area("Impact", height=68)
-    timeline = st.text_area("Timeline, one note per line", height=80)
-    evidence = st.text_area("Evidence, one per line: id | source | observation", height=100)
+    incident_id = st.text_input("Incident id", key="triage_incident_id")
+    symptom = st.text_area("Symptom", key="triage_symptom", height=68)
+    impact = st.text_area("Impact", key="triage_impact", height=68)
+    timeline = st.text_area("Timeline, one note per line", key="triage_timeline", height=80)
+    evidence = st.text_area(
+        "Evidence, one per line: id | source | observation",
+        key="triage_evidence",
+        height=100,
+    )
     triage_col, sample_col = st.columns(2)
     if triage_col.button("Triage this incident"):
         st.session_state.last_fields = on_triage(

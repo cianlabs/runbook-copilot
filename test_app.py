@@ -108,6 +108,59 @@ def test_do_not_run_denies_and_approve_only_simulates(monkeypatch, capsys):
     assert "Nothing on a real machine was changed" in html
 
 
+def test_approve_fills_the_cpu_triage_form_and_writes_lessons(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    view = app.ask("restart the runaway worker", client=app.DemoClient())
+    approved = app.decide("yes", view["pending_action"])
+    out = capsys.readouterr().out
+    form = approved["triage_form"]
+    assert form["incident_id"] == "INC-PRACTICE-CPU"
+    assert "95 percent" in form["symptom"]
+    assert "No real customer" in form["impact"]
+    assert "runaway-worker" in form["timeline"]
+    assert "pid 1842" in form["timeline"]
+    assert "metric-cpu | practice.metrics | web server cpu at 95 percent" in form["evidence"]
+    assert "sim-restart | practice.simulation | restart of runaway-worker" in form["evidence"]
+    assert "Processing resource saturation" in approved["lessons"]
+    assert approved["triage"]["confirmed_root_cause"] is None
+    assert approved["triage"]["action_mode"] == "simulation_only"
+    lessons = approved["lessons"]
+    assert "Practice lessons learned" in lessons
+    assert "not confirmed" in lessons.lower()
+    assert "Product:" in lessons
+    assert "engineering" in lessons.lower()
+    assert "fake restart done" not in lessons.lower()
+    assert "No real process was touched" in approved["decision"]
+    assert out.count("Sending SIGTERM") == 1
+    html = app.render(approved)
+    assert ">INC-PRACTICE-CPU</textarea>" in html
+    assert "Web server CPU is at 95 percent" in html
+    assert "metric-cpu | practice.metrics" in html
+    assert "<h2>Lessons learned</h2>" in html
+    assert "Approve and simulate" not in html
+    assert "SIGTERM" not in html
+
+
+def test_refuse_does_not_fill_the_triage_form(monkeypatch, capsys):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    view = app.ask("restart the runaway worker", client=app.DemoClient())
+    refused = app.decide("no", view["pending_action"])
+    assert not (refused.get("triage_form") or {}).get("incident_id")
+    assert not refused.get("lessons")
+    assert refused.get("triage") is None
+    assert "[simulated]" not in capsys.readouterr().out
+
+
+def test_a_refused_simulation_does_not_invent_a_lesson(monkeypatch):
+    monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
+    view = app.ask("restart the process 'sshd'", client=app.DemoClient())
+    refused = app.decide("yes", view["pending_action"])
+    assert refused["decision_ok"] is False
+    assert "refused" in refused["decision"].lower()
+    assert not refused.get("lessons")
+    assert not (refused.get("triage_form") or {}).get("incident_id")
+
+
 def test_a_word_other_than_yes_does_not_approve(monkeypatch, capsys):
     monkeypatch.setattr(agent.retrieve, "search", lambda q: [CPU])
     view = app.ask("restart the process 'runaway-worker'", client=app.DemoClient())
@@ -246,6 +299,9 @@ def test_the_http_page_requires_a_click_before_the_simulation(monkeypatch):
         assert "Simulated only" in approved
         assert "No real process was touched" in approved
         assert "pid 2107" in approved
+        assert "INC-PRACTICE-CPU" in approved
+        assert "Lessons learned" in approved
+        assert "metric-cpu" in approved
 
         status, again = _post(port, "/decide", {
             "choice": "yes",
